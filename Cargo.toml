@@ -1,0 +1,44 @@
+[package]
+name = "vincents-llm"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-LLM provider abstraction for Vincents.ai - unified interface for OpenAI, Claude, Gemini, Ollama, OpenRouter"
+authors = ["Vincents.ai"]
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+futures = "0.3"
+url = "2.5"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+
+async-openai = { version = "0.32", optional = true }
+anthropic-ai-sdk = { version = "0.2", optional = true }
+google-ai-rs = { version = "0.3", optional = true }
+ollama-rs = { version = "0.3", optional = true }
+openrouter_api = { version = "0.1", optional = true }
+tracing = "0.1"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+async-stream = "0.3"
+tokio-stream = "0.1"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["test-util", "rt-multi-thread"] }
+mockall = "0.11"
+wiremock = "0.5"
+
+[features]
+default = ["openai", "anthropic", "gemini", "ollama", "openrouter"]
+openai = ["async-openai"]
+anthropic = ["anthropic-ai-sdk"]
+gemini = ["google-ai-rs"]
+ollama = ["ollama-rs"]
+openrouter = ["openrouter_api"]
+
+[lib]
+path = "src/lib.rs"
