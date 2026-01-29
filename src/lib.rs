@@ -54,9 +54,9 @@ pub use provider_manager::ProviderManager;
 pub use telemetry::{LlmTelemetryAttributes, LlmTelemetryRecorder, TelemetrySpan, NoopTelemetryRecorder, TracingTelemetryRecorder};
 pub use token_counter::{TokenCounter, TokenCounterConfig, TokenCount, TokenCountingError};
 
-mod provider;
+pub mod provider;
 mod cost_tracker;
 mod rate_limiter;
-mod provider_manager;
+pub mod provider_manager;
 mod telemetry;
 mod token_counter;
