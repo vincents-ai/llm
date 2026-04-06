@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use crate::types::{Usage, ModelPricing};
-use crate::error::Result;
+use crate::types::{ModelPricing, Usage};
 
 /// Cost estimate for a request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,13 +126,7 @@ impl CostTracker {
     }
 
     /// Track usage directly
-    pub fn track_usage(
-        &self,
-        usage: &Usage,
-        pricing: &ModelPricing,
-        model: &str,
-        provider: &str,
-    ) {
+    pub fn track_usage(&self, usage: &Usage, pricing: &ModelPricing, model: &str, provider: &str) {
         let estimate = CostEstimate::from_usage(usage, pricing, model, provider);
         self.track_completion(&estimate);
     }
@@ -150,11 +143,7 @@ impl CostTracker {
 
     /// Get total cost across all providers
     pub fn total_cost(&self) -> f64 {
-        self.total_by_provider
-            .read()
-            .unwrap()
-            .values()
-            .sum()
+        self.total_by_provider.read().unwrap().values().sum()
     }
 
     /// Get recent cost (within window)
@@ -175,11 +164,7 @@ impl CostTracker {
 
     /// Get total tokens
     pub fn total_tokens(&self) -> u64 {
-        self.tokens_by_provider
-            .read()
-            .unwrap()
-            .values()
-            .sum()
+        self.tokens_by_provider.read().unwrap().values().sum()
     }
 
     /// Get request count by provider
@@ -189,11 +174,7 @@ impl CostTracker {
 
     /// Get total requests
     pub fn total_requests(&self) -> u64 {
-        self.requests_by_provider
-            .read()
-            .unwrap()
-            .values()
-            .sum()
+        self.requests_by_provider.read().unwrap().values().sum()
     }
 
     /// Get all cost statistics
@@ -214,8 +195,14 @@ impl CostTracker {
             total_requests: self.total_requests(),
             cost_by_provider: by_provider.clone(),
             cost_by_model: by_model.clone(),
-            top_provider: by_provider.iter().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).map(|(k, v)| (k.clone(), *v)),
-            top_model: by_model.iter().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).map(|(k, v)| (k.clone(), *v)),
+            top_provider: by_provider
+                .iter()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(k, v)| (k.clone(), *v)),
+            top_model: by_model
+                .iter()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(k, v)| (k.clone(), *v)),
             window_duration: self.window_duration,
         }
     }

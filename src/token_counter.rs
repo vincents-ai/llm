@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,7 +52,9 @@ impl Default for TokenCounterConfig {
 pub struct TokenCounter {
     config: TokenCounterConfig,
     cache: HashMap<String, u32>,
-    cache_order: Vec<String>,
+    /// VecDeque gives O(1) pop_front, replacing the previous Vec which had
+    /// O(n) remove(0) on every cache eviction.
+    cache_order: VecDeque<String>,
 }
 
 impl TokenCounter {
@@ -60,7 +62,7 @@ impl TokenCounter {
         Self {
             config: config.unwrap_or_default(),
             cache: HashMap::new(),
-            cache_order: Vec::new(),
+            cache_order: VecDeque::new(),
         }
     }
 
@@ -127,14 +129,14 @@ impl TokenCounter {
 
     fn add_to_cache(&mut self, key: String, value: u32) {
         if self.cache_order.len() >= self.config.cache_size {
-            if let Some(oldest) = self.cache_order.first() {
-                self.cache.remove(oldest);
+            // O(1) pop from the front of the deque
+            if let Some(oldest) = self.cache_order.pop_front() {
+                self.cache.remove(&oldest);
             }
-            self.cache_order.remove(0);
         }
 
         self.cache.insert(key.clone(), value);
-        self.cache_order.push(key);
+        self.cache_order.push_back(key);
     }
 
     pub fn clear_cache(&mut self) {

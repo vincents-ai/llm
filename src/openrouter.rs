@@ -32,7 +32,7 @@ impl Default for OpenRouterConfig {
             api_key: String::new(),
             referrer: None,
             default_route: None,
-            default_model: Some("openai/gpt-4o".to_string()),
+            default_model: None,
             jwt_token: None,
         }
     }
@@ -86,9 +86,11 @@ impl OpenRouterProvider {
         self
     }
 
-    fn get_default_model(&self) -> &str {
-        self.config.default_model.as_deref()
-            .unwrap_or("openai/gpt-4o")
+    fn get_default_model(&self) -> Result<&str> {
+        self.config.default_model.as_deref().ok_or_else(|| LLMError::ConfigurationError {
+            message: "No model configured for OpenRouterProvider — set default_model in OpenRouterConfig or pass a model in the request".to_string(),
+            field: Some("default_model".to_string()),
+        })
     }
 
     fn get_base_url(&self) -> &str {
@@ -121,7 +123,7 @@ impl LLMProvider for OpenRouterProvider {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
         let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
+            self.get_default_model()?.to_string()
         } else {
             request.model.clone()
         };
@@ -275,7 +277,7 @@ impl LLMProvider for OpenRouterProvider {
         request: ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<Chunk>> + Send>>> {
         let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
+            self.get_default_model()?.to_string()
         } else {
             request.model.clone()
         };
@@ -439,14 +441,214 @@ impl LLMProvider for OpenRouterProvider {
 
     async fn chat_completion_with_functions(
         &self,
-        _request: ChatCompletionRequest,
-        _functions: Vec<FunctionDefinition>,
+        request: ChatCompletionRequest,
+        functions: Vec<FunctionDefinition>,
     ) -> Result<ChatCompletionResponse> {
-        Err(LLMError::UnsupportedError {
-            operation: "function_calling".to_string(),
-            provider: Some("openrouter".to_string()),
-            model: None,
+        let model = if request.model.is_empty() {
+            self.get_default_model()?.to_string()
+        } else {
+            request.model.clone()
+        };
+
+        let tools: Vec<serde_json::Value> = functions.iter().map(|f| {
+            let mut func_obj = json!({
+                "name": f.name,
+            });
+            if let Some(desc) = &f.description {
+                func_obj["description"] = json!(desc);
+            }
+            if let Some(params) = &f.parameters {
+                func_obj["parameters"] = params.clone();
+            }
+            json!({
+                "type": "function",
+                "function": func_obj
+            })
+        }).collect();
+
+        let messages: Vec<serde_json::Value> = request.messages
+            .iter()
+            .map(|msg| {
+                match msg {
+                    ChatMessage::System { content, name } => {
+                        let mut obj = json!({"role": "system", "content": content});
+                        if let Some(n) = name { obj["name"] = json!(n); }
+                        obj
+                    }
+                    ChatMessage::User { content, name } => {
+                        let mut obj = json!({"role": "user", "content": content});
+                        if let Some(n) = name { obj["name"] = json!(n); }
+                        obj
+                    }
+                    ChatMessage::Assistant { content, tool_calls, name } => {
+                        let mut obj = json!({"role": "assistant"});
+                        if let Some(c) = content {
+                            obj["content"] = json!(c);
+                        } else {
+                            obj["content"] = serde_json::Value::Null;
+                        }
+                        if let Some(n) = name { obj["name"] = json!(n); }
+                        if let Some(tcs) = tool_calls {
+                            if !tcs.is_empty() {
+                                let or_tcs: Vec<serde_json::Value> = tcs.iter().filter_map(|tc| {
+                                    if let ToolCall::Function(FunctionCall::Custom(c)) = tc {
+                                        Some(json!({
+                                            "id": c.id.as_deref().unwrap_or(""),
+                                            "type": "function",
+                                            "function": {
+                                                "name": c.name,
+                                                "arguments": c.arguments,
+                                            }
+                                        }))
+                                    } else { None }
+                                }).collect();
+                                if !or_tcs.is_empty() { obj["tool_calls"] = json!(or_tcs); }
+                            }
+                        }
+                        obj
+                    }
+                    ChatMessage::Tool { tool_call_id, content } => {
+                        json!({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": content,
+                        })
+                    }
+                    ChatMessage::Function { name, arguments } => {
+                        json!({"role": "function", "name": name, "content": arguments})
+                    }
+                }
+            })
+            .collect();
+
+        let mut body = json!({
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+        });
+
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(max_tokens) = request.max_tokens {
+                obj.insert("max_tokens".to_string(), json!(max_tokens));
+            }
+            if let Some(temp) = request.temperature {
+                obj.insert("temperature".to_string(), json!(temp));
+            }
+            if let Some(top_p) = request.top_p {
+                obj.insert("top_p".to_string(), json!(top_p));
+            }
+            for (key, value) in &request.extra_params {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        let mut request_builder = self.client
+            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .header("Content-Type", "application/json");
+
+        if let Some(jwt) = &self.config.jwt_token {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
+        } else {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        if let Some(referrer) = &self.config.referrer {
+            request_builder = request_builder.header("HTTP-Referer", referrer);
+        }
+
+        if let Some(route) = &self.config.default_route {
+            request_builder = request_builder.header("OpenRouter-Router", route);
+        }
+
+        let response = request_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LLMError::HttpError {
+                message: e.to_string(),
+                status_code: None,
+                body: None,
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let resp_body = response.text().await.ok();
+            return Err(LLMError::HttpError {
+                message: format!("OpenRouter API error: {}", status),
+                status_code: Some(status.as_u16()),
+                body: resp_body,
+            });
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| LLMError::SerializationError {
+                message: e.to_string(),
+                context: Some("Failed to parse OpenRouter response".to_string()),
+            })?;
+
+        let id = json["id"].as_str().unwrap_or("unknown").to_string();
+        let created = json["created"].as_u64().unwrap_or(0);
+        let resp_model = json["model"].as_str().unwrap_or(&model).to_string();
+
+        let choices: Vec<Choice> = json["choices"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .enumerate()
+            .map(|(idx, choice)| {
+                let msg = &choice["message"];
+                let content = msg.get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let tool_calls = msg.get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter().filter_map(|tc| {
+                            let tc_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let func = tc.get("function")?;
+                            let tc_name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let tc_args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                            Some(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
+                                id: if tc_id.is_empty() { None } else { Some(tc_id) },
+                                name: tc_name,
+                                arguments: tc_args,
+                            })))
+                        }).collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty());
+
+                Choice {
+                    index: idx as u32,
+                    message: ChatMessage::Assistant {
+                        content,
+                        tool_calls,
+                        name: None,
+                    },
+                    finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
+                    logprobs: None,
+                }
+            })
+            .collect();
+
+        let usage = json["usage"].as_object().map(|u| Usage {
+            prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
+        });
+
+        Ok(ChatCompletionResponse {
+            id,
+            object: "chat.completion".to_string(),
+            created,
+            model: resp_model,
+            choices,
+            usage,
+            system_fingerprint: json.get("system_fingerprint").and_then(|v| v.as_str()).map(|s| s.to_string()),
         })
+    }
+
+    fn supports_function_calling(&self, _model: &str) -> bool {
+        true
     }
 
     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
@@ -462,7 +664,7 @@ impl LLMProvider for OpenRouterProvider {
 
     async fn estimate_cost(&self, request: &ChatCompletionRequest) -> Result<CostEstimate> {
         let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
+            self.get_default_model()?.to_string()
         } else {
             request.model.clone()
         };

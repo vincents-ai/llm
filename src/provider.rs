@@ -17,6 +17,13 @@ use crate::config::ProviderConfig;
 use crate::RateLimitStatus;
 use crate::CostEstimate;
 
+#[derive(Debug, Clone)]
+pub struct ModelListRequest {
+    pub filter: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<SortOrder>,
+}
+
 /// Core trait that all LLM providers must implement
 ///
 /// This trait defines the standard interface for integrating different LLM providers
@@ -70,6 +77,27 @@ pub trait LLMProvider: Send + Sync {
         self.supported_models().contains(&model.to_string())
     }
 
+    /// List all models from this provider with full information
+    async fn list_models(&self) -> Result<Vec<FullModelInfo>> {
+        // Default implementation - providers should override
+        Ok(self.supported_models()
+            .iter()
+            .map(|model_id| FullModelInfo {
+                id: model_id.clone(),
+                name: model_id.clone(),
+                provider: self.name().to_string(),
+                description: None,
+                context_window: 0,
+                max_output_tokens: 0,
+                capabilities: self.get_model_capabilities(model_id)
+                    .unwrap_or_default(),
+                pricing: self.get_model_pricing(model_id),
+                created: 0,
+                available: true,
+            })
+            .collect())
+    }
+
     /// Get model information
     fn get_model_info(&self, model: &str) -> Option<ModelInfo> {
         if self.supports_model(model) {
@@ -83,6 +111,12 @@ pub trait LLMProvider: Send + Sync {
         } else {
             None
         }
+    }
+
+    /// Get comprehensive model information
+    async fn get_full_model_info(&self, model_id: &str) -> Result<Option<FullModelInfo>> {
+        let models = self.list_models().await?;
+        Ok(models.into_iter().find(|m| m.id == model_id))
     }
 
     /// Get pricing for a model

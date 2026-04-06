@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Sort order for model listings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
 /// Role of a chat message sender
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,10 +52,7 @@ pub enum ChatMessage {
 
     /// Function call from the model
     #[serde(rename = "function")]
-    Function {
-        name: String,
-        arguments: String,
-    },
+    Function { name: String, arguments: String },
 
     /// Tool result from function execution
     #[serde(rename = "tool")]
@@ -141,6 +146,8 @@ pub struct RetrievalCall {
 /// Custom function call from function definitions
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomFunctionCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub arguments: String,
 }
@@ -354,7 +361,7 @@ pub struct ChunkCompletion {
     pub choices: Vec<ChoiceDelta>,
 }
 
-/// Model information
+/// Model information (basic)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -367,10 +374,57 @@ pub struct ModelInfo {
     pub permission: Option<Vec<serde_json::Value>>,
 }
 
+/// Comprehensive model information with all details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullModelInfo {
+    /// Unique model identifier
+    pub id: String,
+
+    /// Human-readable model name
+    #[serde(default)]
+    pub name: String,
+
+    /// Provider name
+    #[serde(default)]
+    pub provider: String,
+
+    /// Model description
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Context window size in tokens
+    #[serde(default)]
+    pub context_window: u32,
+
+    /// Maximum output tokens
+    #[serde(default)]
+    pub max_output_tokens: u32,
+
+    /// Model capabilities
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+
+    /// Pricing information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
+
+    /// Release date
+    #[serde(default)]
+    pub created: u64,
+
+    /// Whether the model is currently available
+    #[serde(default = "default_true")]
+    pub available: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Pricing information for a model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
-    pub prompt_tokens: f64,    // Cost per 1K input tokens
+    pub prompt_tokens: f64,     // Cost per 1K input tokens
     pub completion_tokens: f64, // Cost per 1K output tokens
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_tokens: Option<f64>,
@@ -383,6 +437,7 @@ pub struct ModelCapabilities {
     pub vision: bool,
     pub streaming: bool,
     pub json_mode: bool,
+    pub caching: bool,
     #[serde(default)]
     pub max_tokens: u32,
     #[serde(default)]

@@ -1,11 +1,10 @@
 use crate::provider::{LLMProvider, ProviderHealth, ProviderRegistry};
 use crate::error::{LLMError, Result};
-use crate::config::ProviderConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Configuration for provider manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,17 +59,22 @@ impl ProviderManager {
     /// Register a provider
     pub async fn register_provider(&self, provider: Arc<dyn LLMProvider>) {
         let name = provider.name().to_string();
-        let config = provider.config();
+        let _config = provider.config();
 
-        self.providers.write().unwrap().insert(name.clone(), provider);
+        match self.providers.write() {
+            Ok(mut p) => { p.insert(name.clone(), provider); }
+            Err(poisoned) => { poisoned.into_inner().insert(name.clone(), provider); }
+        }
 
         info!("Registered provider: {}", name);
     }
 
     /// Get a provider by name
     pub fn get_provider(&self, name: &str) -> Option<Arc<dyn LLMProvider>> {
-        let providers = self.providers.read().unwrap();
-        providers.get(name).cloned()
+        match self.providers.read() {
+            Ok(p) => p.get(name).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(name).cloned(),
+        }
     }
 
     /// Get the default provider
@@ -83,7 +87,10 @@ impl ProviderManager {
         &self,
         model: &str,
     ) -> Result<Arc<dyn LLMProvider>> {
-        let providers = self.providers.read().unwrap();
+        let providers = match self.providers.read() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         // Find available providers that support the model
         let available: Vec<_> = providers
@@ -143,7 +150,10 @@ impl ProviderManager {
         F: std::future::Future<Output = Result<T>>,
     {
         let model = request.model.clone();
-        let providers = self.providers.read().unwrap().clone();
+        let providers = match self.providers.read() {
+            Ok(p) => p.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
 
         for (name, provider) in providers {
             if !provider.supports_model(&model) {
@@ -177,7 +187,10 @@ impl ProviderManager {
 
     /// Get health status for all providers
     pub async fn health_status(&self) -> HashMap<String, ProviderHealth> {
-        let providers = self.providers.read().unwrap();
+        let providers = match self.providers.read() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let mut status = HashMap::new();
 
         for (name, provider) in providers.iter() {
@@ -197,7 +210,10 @@ impl ProviderManager {
 
     /// Check if provider is available
     fn is_provider_available(&self, name: &str) -> bool {
-        let breakers = self.circuit_breakers.read().unwrap();
+        let breakers = match self.circuit_breakers.read() {
+            Ok(b) => b,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         match breakers.get(name) {
             Some(state) => !state.is_open(),
             None => true,
@@ -206,7 +222,10 @@ impl ProviderManager {
 
     /// Record an error for a provider
     fn record_error(&self, name: &str) {
-        let mut breakers = self.circuit_breakers.write().unwrap();
+        let mut breakers = match self.circuit_breakers.write() {
+            Ok(b) => b,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if let Some(state) = breakers.get_mut(name) {
             state.record_failure();
         }
@@ -214,7 +233,10 @@ impl ProviderManager {
 
     /// Get all provider names
     pub fn provider_names(&self) -> Vec<String> {
-        self.providers.read().unwrap().keys().cloned().collect()
+        match self.providers.read() {
+            Ok(p) => p.keys().cloned().collect(),
+            Err(poisoned) => poisoned.into_inner().keys().cloned().collect(),
+        }
     }
 }
 

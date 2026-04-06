@@ -4,6 +4,7 @@
  * A multi-LLM provider abstraction layer for Rust applications.
  * Provides a unified interface for OpenAI, Claude, Gemini, Ollama, and OpenRouter.
  */
+#![allow(dead_code)]
 
 pub mod config;
 pub mod error;

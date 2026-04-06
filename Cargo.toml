@@ -16,11 +16,6 @@ url = "2.5"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 
-async-openai = { version = "0.32", optional = true }
-anthropic-ai-sdk = { version = "0.2", optional = true }
-google-ai-rs = { version = "0.3", optional = true }
-ollama-rs = { version = "0.3", optional = true }
-openrouter_api = { version = "0.1", optional = true }
 tracing = "0.1"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 async-stream = "0.3"
@@ -31,14 +26,15 @@ rand = "0.8"
 tokio = { version = "1.0", features = ["test-util", "rt-multi-thread"] }
 mockall = "0.11"
 wiremock = "0.5"
+cucumber = "0.20"
 
 [features]
 default = ["openai", "anthropic", "gemini", "ollama", "openrouter"]
-openai = ["async-openai"]
-anthropic = ["anthropic-ai-sdk"]
-gemini = ["google-ai-rs"]
-ollama = ["ollama-rs"]
-openrouter = ["openrouter_api"]
+openai = []
+anthropic = []
+gemini = []
+ollama = []
+openrouter = []
 
 [lib]
 path = "src/lib.rs"

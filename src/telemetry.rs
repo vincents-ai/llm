@@ -1,7 +1,7 @@
-use crate::types::{ChatCompletionRequest, ChatCompletionResponse, Chunk};
 use crate::error::LLMError;
+use crate::types::{ChatCompletionRequest, ChatCompletionResponse, Chunk};
 use std::time::{Duration, Instant};
-use tracing::{span, Level, Event, Span, info, debug, error, trace};
+use tracing::{debug, error, span, trace, Level};
 
 pub type TelemetryContext = ();
 
@@ -121,7 +121,7 @@ impl LlmTelemetryRecorder for TracingTelemetryRecorder {
             operation = attrs.operation,
         );
         span.record("request_id", attrs.request_id.clone().unwrap_or_default());
-        span.enter();
+        let _entered = span.enter();
     }
 
     fn record_request_completed(&self, attrs: &LlmTelemetryAttributes, duration: Duration) {
@@ -146,7 +146,7 @@ impl LlmTelemetryRecorder for TracingTelemetryRecorder {
         );
     }
 
-    fn record_chunk(&self, attrs: &LlmTelemetryAttributes, chunk: &Chunk) {
+    fn record_chunk(&self, attrs: &LlmTelemetryAttributes, _chunk: &Chunk) {
         tracing::trace!(
             target: "llm",
             provider = attrs.provider,

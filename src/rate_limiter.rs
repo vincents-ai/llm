@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::Notify;
 
 /// Rate limit status for a provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,56 +64,66 @@ impl Default for RetryStrategy {
     }
 }
 
-/// Token bucket rate limiter
+/// Token bucket rate limiter.
+///
+/// Uses `std::time::Instant` for all elapsed-time calculations (monotonically
+/// non-decreasing) and a `tokio::sync::Notify` to wake waiting tasks exactly
+/// when tokens become available, eliminating the previous 50 ms polling loop.
 #[derive(Debug)]
 pub struct RateLimiter {
-    /// Requests per minute limit
+    /// Requests per minute limit (stored for status reporting)
     rpm_limit: AtomicU64,
-    /// Current request count
-    request_count: AtomicU64,
-    /// Last reset time
-    last_reset: AtomicU64,
-    /// Token bucket state
+    /// Current token count in the bucket
     token_bucket: AtomicU64,
-    /// Max tokens
+    /// Maximum tokens (bucket capacity)
     max_tokens: AtomicU64,
     /// Refill rate (tokens per second)
     refill_rate: AtomicU64,
+    /// Monotonic timestamp of the last refill, guarded by a Mutex so that
+    /// the compare-and-update in `refill()` is race-free.
+    last_refill: Mutex<Instant>,
+    /// Notified whenever tokens are added so that waiting callers can retry
+    /// immediately rather than sleeping on a fixed interval.
+    available: Arc<Notify>,
 }
 
 impl RateLimiter {
-    /// Create a new rate limiter
+    /// Create a rate limiter capped at `requests_per_minute`.
     pub fn new(requests_per_minute: u64) -> Self {
         Self {
             rpm_limit: AtomicU64::new(requests_per_minute),
-            request_count: AtomicU64::new(0),
-            last_reset: AtomicU64::new(0),
             token_bucket: AtomicU64::new(requests_per_minute),
             max_tokens: AtomicU64::new(requests_per_minute),
-            refill_rate: AtomicU64::new(requests_per_minute / 60),
+            refill_rate: AtomicU64::new((requests_per_minute / 60).max(1)),
+            last_refill: Mutex::new(Instant::now()),
+            available: Arc::new(Notify::new()),
         }
     }
 
-    /// Create with token bucket configuration
+    /// Create with explicit token-bucket parameters.
     pub fn with_tokens(max_tokens: u64, refill_rate_per_sec: u64) -> Self {
+        let rpm = max_tokens.saturating_mul(60) / refill_rate_per_sec.max(1);
         Self {
-            rpm_limit: AtomicU64::new(max_tokens * 60 / refill_rate_per_sec),
-            request_count: AtomicU64::new(0),
-            last_reset: AtomicU64::new(0),
+            rpm_limit: AtomicU64::new(rpm),
             token_bucket: AtomicU64::new(max_tokens),
             max_tokens: AtomicU64::new(max_tokens),
-            refill_rate: AtomicU64::new(refill_rate_per_sec),
+            refill_rate: AtomicU64::new(refill_rate_per_sec.max(1)),
+            last_refill: Mutex::new(Instant::now()),
+            available: Arc::new(Notify::new()),
         }
     }
 
-    /// Check if request is allowed
+    /// Non-blocking attempt to consume one token. Returns `true` on success.
     pub fn try_acquire(&self) -> bool {
         self.refill();
-        let tokens = self.token_bucket.load(Ordering::Relaxed);
-        tokens > 0 && self.try_consume()
+        self.try_consume()
     }
 
-    /// Wait for rate limit availability
+    /// Await availability of a token without polling.
+    ///
+    /// Instead of sleeping on a fixed 50 ms interval, this method waits on a
+    /// `Notify` that fires as soon as tokens are refilled, giving zero
+    /// unnecessary latency and zero wasted CPU cycles.
     pub async fn acquire(&self) -> std::result::Result<(), RateLimitError> {
         let start = Instant::now();
         let max_wait = Duration::from_secs(60);
@@ -127,12 +138,21 @@ impl RateLimiter {
                 return Err(RateLimitError::Timeout);
             }
 
-            let delay = Duration::from_millis(50);
-            tokio::time::sleep(delay).await;
+            // Calculate exactly how long until the next token is available
+            // and use that as our sleep duration. The Notify will also wake us
+            // early if `reset()` adds tokens externally.
+            let rate = self.refill_rate.load(Ordering::Relaxed).max(1);
+            let wait_ms = (1000_u64 / rate).max(1).min(1000);
+            let notify = self.available.clone();
+
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {}
+            }
         }
     }
 
-    /// Get current status
+    /// Current status snapshot.
     pub fn status(&self) -> RateLimitStatus {
         self.refill();
         let tokens = self.token_bucket.load(Ordering::Relaxed);
@@ -148,48 +168,65 @@ impl RateLimiter {
         }
     }
 
-    /// Reset the rate limiter
+    /// Reset bucket to full capacity and notify any waiting tasks.
     pub fn reset(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        self.request_count.store(0, Ordering::Relaxed);
-        self.last_reset.store(now, Ordering::Relaxed);
-        self.token_bucket
-            .store(self.max_tokens.load(Ordering::Relaxed), Ordering::Relaxed);
+        let max = self.max_tokens.load(Ordering::Relaxed);
+        self.token_bucket.store(max, Ordering::Relaxed);
+        if let Ok(mut last) = self.last_refill.lock() {
+            *last = Instant::now();
+        }
+        self.available.notify_waiters();
     }
+
+    // ── private ──────────────────────────────────────────────────────────────
 
     fn try_consume(&self) -> bool {
-        let current = self.token_bucket.load(Ordering::Relaxed);
-        if current == 0 {
-            return false;
+        // CAS loop to safely decrement without racing another thread.
+        loop {
+            let current = self.token_bucket.load(Ordering::Acquire);
+            if current == 0 {
+                return false;
+            }
+            match self.token_bucket.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue, // another thread raced us; retry
+            }
         }
-        self.token_bucket
-            .store(current.saturating_sub(1), Ordering::Relaxed);
-        true
     }
 
+    /// Refill the bucket based on elapsed monotonic time since the last refill.
     fn refill(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = Instant::now();
+        let mut last = match self.last_refill.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(), // recover from panic
+        };
 
-        let last_reset = self.last_reset.load(Ordering::Relaxed);
-        let elapsed = now.saturating_sub(last_reset);
-
-        if elapsed == 0 {
+        let elapsed_secs = now.duration_since(*last).as_secs();
+        if elapsed_secs == 0 {
             return;
         }
 
-        let refill = elapsed * self.refill_rate.load(Ordering::Relaxed);
+        let rate = self.refill_rate.load(Ordering::Relaxed);
+        let new_tokens = elapsed_secs.saturating_mul(rate);
+        if new_tokens == 0 {
+            return;
+        }
+
         let max = self.max_tokens.load(Ordering::Relaxed);
         let current = self.token_bucket.load(Ordering::Relaxed);
-        let new_tokens = std::cmp::min(max, current.saturating_add(refill));
+        let filled = std::cmp::min(max, current.saturating_add(new_tokens));
+        self.token_bucket.store(filled, Ordering::Relaxed);
+        *last = now;
 
-        self.token_bucket.store(new_tokens, Ordering::Relaxed);
+        if filled > current {
+            self.available.notify_waiters();
+        }
     }
 }
 

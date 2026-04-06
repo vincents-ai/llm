@@ -15,7 +15,6 @@ use crate::provider::LLMProvider;
 use crate::RateLimitStatus;
 use crate::CostEstimate;
 
-/// Gemini Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiConfig {
     pub api_key: String,
@@ -27,21 +26,134 @@ impl Default for GeminiConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            default_model: Some("gemini-1.5-pro".to_string()),
+            default_model: None,
             base_url: None,
         }
     }
 }
 
-/// Gemini Provider
 #[derive(Debug)]
 pub struct GeminiProvider {
     config: GeminiConfig,
     client: reqwest::Client,
 }
 
+fn convert_message(msg: &ChatMessage) -> serde_json::Value {
+    match msg {
+        ChatMessage::System { content, .. } => {
+            json!({
+                "role": "system",
+                "parts": [{"text": content}]
+            })
+        }
+        ChatMessage::User { content, .. } => {
+            json!({
+                "role": "user",
+                "parts": [{"text": content}]
+            })
+        }
+        ChatMessage::Assistant { content, tool_calls, .. } => {
+            let mut parts = Vec::new();
+            if let Some(text) = content {
+                if !text.is_empty() {
+                    parts.push(json!({"text": text}));
+                }
+            }
+            if let Some(calls) = tool_calls {
+                for tc in calls {
+                    if let ToolCall::Function(FunctionCall::Custom(custom)) = tc {
+                        let args: serde_json::Value = serde_json::from_str(&custom.arguments)
+                            .unwrap_or(json!({}));
+                        parts.push(json!({
+                            "functionCall": {
+                                "name": custom.name,
+                                "args": args,
+                            }
+                        }));
+                    }
+                }
+            }
+            if parts.is_empty() {
+                parts.push(json!({"text": ""}));
+            }
+            json!({
+                "role": "model",
+                "parts": parts,
+            })
+        }
+        ChatMessage::Tool { tool_call_id, content } => {
+            json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": tool_call_id,
+                        "response": { "content": content }
+                    }
+                }]
+            })
+        }
+        ChatMessage::Function { name, arguments } => {
+            json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": name,
+                        "response": { "content": arguments }
+                    }
+                }]
+            })
+        }
+    }
+}
+
+fn parse_response_parts(parts: &[serde_json::Value]) -> (Option<String>, Vec<ToolCall>) {
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+            text_parts.push(text.to_string());
+        }
+        if let Some(fc) = part.get("functionCall") {
+            let name = fc.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = fc.get("args").cloned().unwrap_or(json!({}));
+            let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+            tool_calls.push(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
+                id: None,
+                name,
+                arguments,
+            })));
+        }
+    }
+
+    let text = if text_parts.is_empty() {
+        None
+    } else {
+        Some(text_parts.join(""))
+    };
+
+    (text, tool_calls)
+}
+
+fn normalize_finish_reason(raw: Option<&str>, has_tool_calls: bool) -> Option<String> {
+    match raw {
+        Some("STOP") => {
+            if has_tool_calls {
+                Some("tool_calls".to_string())
+            } else {
+                Some("stop".to_string())
+            }
+        }
+        Some("SAFETY") => Some("content_filter".to_string()),
+        Some(other) => Some(other.to_lowercase()),
+        None => None,
+    }
+}
+
 impl GeminiProvider {
-    /// Create a new Gemini provider
     pub async fn new(api_key: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
         
@@ -54,7 +166,6 @@ impl GeminiProvider {
         })
     }
 
-    /// Create with custom configuration
     pub fn with_config(config: GeminiConfig) -> Result<Self> {
         if config.api_key.is_empty() {
             return Err(LLMError::ConfigurationError {
@@ -69,82 +180,25 @@ impl GeminiProvider {
         })
     }
 
-    fn get_base_url(&self) -> String {
-        let model = self.config.default_model.as_deref().unwrap_or("gemini-1.5-pro");
-        format!(
+    fn get_base_url(&self) -> Result<String> {
+        let model = self.config.default_model.as_deref().ok_or_else(|| LLMError::ConfigurationError {
+            message: "No model configured for GeminiProvider — set default_model in GeminiConfig or pass a model in the request".to_string(),
+            field: Some("default_model".to_string()),
+        })?;
+        Ok(format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
             model
-        )
+        ))
     }
 
-    fn get_default_model(&self) -> &str {
-        self.config.default_model.as_deref()
-            .unwrap_or("gemini-1.5-pro")
-    }
-}
-
-#[async_trait]
-impl LLMProvider for GeminiProvider {
-    fn name(&self) -> &str {
-        "gemini"
+    fn get_default_model(&self) -> Result<&str> {
+        self.config.default_model.as_deref().ok_or_else(|| LLMError::ConfigurationError {
+            message: "No model configured for GeminiProvider — set default_model in GeminiConfig or pass a model in the request".to_string(),
+            field: Some("default_model".to_string()),
+        })
     }
 
-    fn supported_models(&self) -> Vec<String> {
-        vec![
-            "gemini-1.5-pro".to_string(),
-            "gemini-1.5-flash".to_string(),
-            "gemini-1.0-pro".to_string(),
-        ]
-    }
-
-    async fn chat_completion(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse> {
-        let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
-        } else {
-            request.model.clone()
-        };
-
-        // Convert messages to Gemini format
-        let contents: Vec<serde_json::Value> = request.messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role() {
-                    MessageRole::System => "system",
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "model",
-                    MessageRole::Function | MessageRole::Tool => "user",
-                };
-
-                let content = msg.content()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-
-                json!({
-                    "role": role,
-                    "parts": [{"text": content}]
-                })
-            })
-            .collect();
-
-        let mut body = json!({
-            "contents": contents,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("maxOutputTokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("topP".to_string(), json!(top_p));
-            }
-        }
-
+    async fn send_request(&self, model: &str, body: serde_json::Value) -> Result<serde_json::Value> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             model,
@@ -173,12 +227,14 @@ impl LLMProvider for GeminiProvider {
             });
         }
 
-        let json: serde_json::Value = response.json().await
+        response.json().await
             .map_err(|e| LLMError::SerializationError {
                 message: e.to_string(),
                 context: Some("Failed to parse Gemini response".to_string()),
-            })?;
+            })
+    }
 
+    fn build_response(json: serde_json::Value, model: String) -> ChatCompletionResponse {
         let empty_array: Vec<serde_json::Value> = Vec::new();
         let candidates = json["candidates"].as_array().unwrap_or(&empty_array);
 
@@ -186,17 +242,30 @@ impl LLMProvider for GeminiProvider {
             .iter()
             .enumerate()
             .map(|(idx, candidate)| {
-                let content = candidate["content"]["parts"][0]["text"]
-                    .as_str()
-                    .unwrap_or("");
+                let parts = candidate["content"]["parts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let (text, tool_calls) = parse_response_parts(&parts);
 
-                let finish_reason = candidate["finishReason"]
-                    .as_str()
-                    .map(|s| s.to_string());
+                let finish_reason = normalize_finish_reason(
+                    candidate["finishReason"].as_str(),
+                    !tool_calls.is_empty(),
+                );
+
+                let message = if !tool_calls.is_empty() {
+                    ChatMessage::Assistant {
+                        content: text,
+                        tool_calls: Some(tool_calls),
+                        name: None,
+                    }
+                } else {
+                    ChatMessage::assistant(text.unwrap_or_default())
+                };
 
                 Choice {
                     index: idx as u32,
-                    message: ChatMessage::assistant(content),
+                    message,
                     finish_reason,
                     logprobs: None,
                 }
@@ -216,7 +285,7 @@ impl LLMProvider for GeminiProvider {
 
         let id = format!("gemini_{}", chrono::Utc::now().timestamp_millis());
 
-        Ok(ChatCompletionResponse {
+        ChatCompletionResponse {
             id,
             object: "chat.completion".to_string(),
             created: chrono::Utc::now().timestamp() as u64,
@@ -224,7 +293,63 @@ impl LLMProvider for GeminiProvider {
             choices,
             usage,
             system_fingerprint: None,
-        })
+        }
+    }
+
+    fn build_body(messages: &[ChatMessage], _model: &str, request: &ChatCompletionRequest) -> serde_json::Value {
+        let contents: Vec<serde_json::Value> = messages
+            .iter()
+            .map(convert_message)
+            .collect();
+
+        let mut body = json!({
+            "contents": contents,
+        });
+
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(max_tokens) = request.max_tokens {
+                obj.insert("maxOutputTokens".to_string(), json!(max_tokens));
+            }
+            if let Some(temp) = request.temperature {
+                obj.insert("temperature".to_string(), json!(temp));
+            }
+            if let Some(top_p) = request.top_p {
+                obj.insert("topP".to_string(), json!(top_p));
+            }
+        }
+
+        body
+    }
+}
+
+#[async_trait]
+impl LLMProvider for GeminiProvider {
+    fn name(&self) -> &str {
+        "gemini"
+    }
+
+    fn supported_models(&self) -> Vec<String> {
+        vec![
+            "gemini-1.5-pro".to_string(),
+            "gemini-1.5-flash".to_string(),
+            "gemini-1.0-pro".to_string(),
+        ]
+    }
+
+    async fn chat_completion(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
+        let model = if request.model.is_empty() {
+            self.get_default_model()?.to_string()
+        } else {
+            request.model.clone()
+        };
+
+        let body = Self::build_body(&request.messages, &model, &request);
+
+        let json = self.send_request(&model, body).await?;
+        Ok(Self::build_response(json, model))
     }
 
     async fn chat_completion_stream(
@@ -232,30 +357,14 @@ impl LLMProvider for GeminiProvider {
         request: ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<Chunk>> + Send>>> {
         let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
+            self.get_default_model()?.to_string()
         } else {
             request.model.clone()
         };
 
         let contents: Vec<serde_json::Value> = request.messages
             .iter()
-            .map(|msg| {
-                let role = match msg.role() {
-                    MessageRole::System => "system",
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "model",
-                    MessageRole::Function | MessageRole::Tool => "user",
-                };
-
-                let content = msg.content()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-
-                serde_json::json!({
-                    "role": role,
-                    "parts": [{"text": content}]
-                })
-            })
+            .map(convert_message)
             .collect();
 
         let mut body = serde_json::json!({
@@ -383,14 +492,84 @@ impl LLMProvider for GeminiProvider {
 
     async fn chat_completion_with_functions(
         &self,
-        _request: ChatCompletionRequest,
-        _functions: Vec<FunctionDefinition>,
+        request: ChatCompletionRequest,
+        functions: Vec<FunctionDefinition>,
     ) -> Result<ChatCompletionResponse> {
-        Err(LLMError::UnsupportedError {
-            operation: "function_calling".to_string(),
-            provider: Some("gemini".to_string()),
-            model: None,
-        })
+        let model = if request.model.is_empty() {
+            self.get_default_model()?.to_string()
+        } else {
+            request.model.clone()
+        };
+
+        let function_declarations: Vec<serde_json::Value> = functions.iter().map(|f| {
+            let mut decl = json!({
+                "name": f.name,
+            });
+            if let Some(desc) = &f.description {
+                decl["description"] = json!(desc);
+            }
+            if let Some(params) = &f.parameters {
+                decl["parameters"] = params.clone();
+            }
+            decl
+        }).collect();
+
+        let tools = json!([{ "functionDeclarations": function_declarations }]);
+        let tool_config = json!({
+            "functionCallingConfig": { "mode": "AUTO" }
+        });
+
+        let non_system_messages: Vec<&ChatMessage> = request.messages
+            .iter()
+            .filter(|m| m.role() != MessageRole::System)
+            .collect();
+
+        let system_messages: Vec<&ChatMessage> = request.messages
+            .iter()
+            .filter(|m| m.role() == MessageRole::System)
+            .collect();
+
+        let contents: Vec<serde_json::Value> = non_system_messages
+            .iter()
+            .map(|m| convert_message(m))
+            .collect();
+
+        let mut body = json!({
+            "contents": contents,
+            "tools": tools,
+            "toolConfig": tool_config,
+        });
+
+        if !system_messages.is_empty() {
+            let system_parts: Vec<serde_json::Value> = system_messages
+                .iter()
+                .map(|m| {
+                    let text = m.content().unwrap_or("");
+                    json!({"text": text})
+                })
+                .collect();
+            body["systemInstruction"] = json!({ "parts": system_parts });
+        }
+
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(max_tokens) = request.max_tokens {
+                obj.insert("maxOutputTokens".to_string(), json!(max_tokens));
+            }
+            if let Some(temp) = request.temperature {
+                obj.insert("temperature".to_string(), json!(temp));
+            }
+            if let Some(top_p) = request.top_p {
+                obj.insert("topP".to_string(), json!(top_p));
+            }
+        }
+
+        let json = self.send_request(&model, body).await?;
+        Ok(Self::build_response(json, model))
+    }
+
+    fn supports_function_calling(&self, model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.contains("1.5") || m.contains("2.0") || m.contains("flash") || m.contains("gemini-pro")
     }
 
     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
@@ -406,7 +585,7 @@ impl LLMProvider for GeminiProvider {
 
     async fn estimate_cost(&self, request: &ChatCompletionRequest) -> Result<CostEstimate> {
         let model = if request.model.is_empty() {
-            self.get_default_model().to_string()
+            self.get_default_model()?.to_string()
         } else {
             request.model.clone()
         };
