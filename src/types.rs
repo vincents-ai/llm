@@ -428,6 +428,9 @@ pub struct ModelPricing {
     pub completion_tokens: f64, // Cost per 1K output tokens
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_tokens: Option<f64>,
+    /// Whether this model is free (both prompt and completion cost are zero)
+    #[serde(default)]
+    pub is_free: bool,
 }
 
 /// Model capabilities
@@ -442,6 +445,15 @@ pub struct ModelCapabilities {
     pub max_tokens: u32,
     #[serde(default)]
     pub context_window: u32,
+    /// Input modalities (e.g. "text", "image", "audio", "video")
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    /// Output modalities (e.g. "text", "image")
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    /// Model strengths (e.g. "coding", "reasoning", "math", "creative")
+    #[serde(default)]
+    pub strengths: Vec<String>,
 }
 
 /// A model variant

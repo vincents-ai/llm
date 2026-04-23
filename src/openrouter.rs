@@ -105,6 +105,8 @@ impl LLMProvider for OpenRouterProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
+        // We no longer hardcode — list_models() hits the live API.
+        // Keep a small fallback list for offline / error scenarios.
         vec![
             "openai/gpt-4o".to_string(),
             "openai/gpt-4o-mini".to_string(),
@@ -116,6 +118,136 @@ impl LLMProvider for OpenRouterProvider {
             "mistralai/mistral-7b".to_string(),
             "cohere/command-r".to_string(),
         ]
+    }
+
+    /// Fetch all models from OpenRouter's live `/api/v1/models` endpoint.
+    /// No authentication required.
+    async fn list_models(&self) -> Result<Vec<FullModelInfo>> {
+        let resp = self.client
+            .get(&format!("{}/models", self.get_base_url()))
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|e| LLMError::HttpError {
+                message: format!("Failed to fetch OpenRouter models: {}", e),
+                status_code: None,
+                body: None,
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.ok();
+            return Err(LLMError::HttpError {
+                message: format!("OpenRouter /models returned {}: {}", status, body.clone().unwrap_or_default()),
+                status_code: Some(status.as_u16()),
+                body,
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(|e| LLMError::SerializationError {
+            message: e.to_string(),
+            context: Some("Failed to parse OpenRouter models response".to_string()),
+        })?;
+
+        let data = json["data"].as_array().ok_or_else(|| LLMError::SerializationError {
+            message: "Missing 'data' array in models response".to_string(),
+            context: None,
+        })?;
+
+        let models: Vec<FullModelInfo> = data.iter().map(|m| {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            let name = m["name"].as_str().unwrap_or(&id).to_string();
+            let description = m["description"].as_str().map(String::from);
+            let context_length = m["context_length"].as_u64().unwrap_or(0) as u32;
+            let created = m["created"].as_u64().unwrap_or(0);
+
+            // Parse architecture / modalities
+            let arch = &m["architecture"];
+            let input_modalities: Vec<String> = arch["input_modalities"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let output_modalities: Vec<String> = arch["output_modalities"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let has_vision = input_modalities.iter().any(|m| m == "image");
+
+            // Parse supported parameters → capabilities
+            let params: Vec<String> = m["supported_parameters"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let has_tools = params.iter().any(|p| p == "tools" || p == "tool_choice");
+            let has_json = params.iter().any(|p| p == "response_format" || p == "structured_outputs");
+
+            // Parse pricing
+            let pricing_obj = &m["pricing"];
+            let prompt_price: f64 = pricing_obj["prompt"].as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| pricing_obj["prompt"].as_f64())
+                .unwrap_or(0.0);
+            let completion_price: f64 = pricing_obj["completion"].as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| pricing_obj["completion"].as_f64())
+                .unwrap_or(0.0);
+            // OpenRouter pricing is per-token, convert to per-1K tokens
+            let prompt_per_1k = prompt_price * 1000.0;
+            let completion_per_1k = completion_price * 1000.0;
+            let is_free = prompt_price == 0.0 && completion_price == 0.0;
+
+            // Max completion tokens
+            let max_output = m["top_provider"]["max_completion_tokens"]
+                .as_u64()
+                .unwrap_or(context_length as u64) as u32;
+
+            // Derive strengths from model id/name heuristics
+            let id_lower = id.to_lowercase();
+            let mut strengths = Vec::new();
+            if id_lower.contains("coder") || id_lower.contains("code") || id_lower.contains("deepseek") {
+                strengths.push("coding".to_string());
+            }
+            if id_lower.contains("reason") || id_lower.contains("o1") || id_lower.contains("o3") || id_lower.contains("think") {
+                strengths.push("reasoning".to_string());
+            }
+            if id_lower.contains("math") {
+                strengths.push("math".to_string());
+            }
+            if id_lower.contains("vision") || has_vision {
+                strengths.push("vision".to_string());
+            }
+
+            FullModelInfo {
+                id,
+                name,
+                provider: "openrouter".to_string(),
+                description,
+                context_window: context_length,
+                max_output_tokens: max_output,
+                capabilities: ModelCapabilities {
+                    function_calling: has_tools,
+                    vision: has_vision,
+                    streaming: true, // OpenRouter supports streaming for all models
+                    json_mode: has_json,
+                    caching: false,
+                    max_tokens: max_output,
+                    context_window: context_length,
+                    input_modalities,
+                    output_modalities,
+                    strengths,
+                },
+                pricing: Some(ModelPricing {
+                    prompt_tokens: prompt_per_1k,
+                    completion_tokens: completion_per_1k,
+                    image_tokens: None,
+                    is_free,
+                }),
+                created,
+                available: true,
+            }
+        }).collect();
+
+        Ok(models)
     }
 
     async fn chat_completion(
