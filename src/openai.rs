@@ -249,6 +249,112 @@ impl OpenAIProvider {
             system_fingerprint: json.get("system_fingerprint").and_then(|v| v.as_str()).map(|s| s.to_string()),
         }
     }
+
+    /// Fetch models from the live OpenAI API.
+    async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
+        let mut req = self.client
+            .get(&format!("{}/models", self.get_base_url()))
+            .header("Content-Type", "application/json");
+
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+        if let Some(org) = &self.config.organization_id {
+            req = req.header("OpenAI-Organization", org);
+        }
+
+        let resp = req.send().await.map_err(|e| crate::error::LLMError::HttpError {
+            message: format!("Failed to fetch OpenAI models: {}", e),
+            status_code: None,
+            body: None,
+        })?;
+
+        if !resp.status().is_success() {
+            return Err(crate::error::LLMError::HttpError {
+                message: format!("OpenAI /models returned {}", resp.status()),
+                status_code: Some(resp.status().as_u16()),
+                body: resp.text().await.ok(),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(|e| crate::error::LLMError::SerializationError {
+            message: e.to_string(),
+            context: Some("Failed to parse models response".to_string()),
+        })?;
+        let data = json["data"].as_array()
+            .ok_or_else(|| crate::error::LLMError::SerializationError {
+                message: "Missing 'data' array".to_string(),
+                context: None,
+            })?;
+
+        let mut models = self.known_models_lookup();
+        let known_ids: Vec<_> = models.iter().map(|m| m.id.clone()).collect();
+
+        for m in data {
+            let id = match m["id"].as_str() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            if known_ids.contains(&id) { continue; }
+
+            let id_lower = id.to_lowercase();            let has_vision = id_lower.contains("vision") || id_lower.contains("gpt-4o");
+            let has_tools = id_lower.contains("gpt-4") || id_lower.contains("gpt-3.5") || id_lower.contains("o1") || id_lower.contains("o3");
+            let ctx: u32 = if id_lower.contains("128k") || id_lower.contains("gpt-4o") { 128000 } else { 16384 };
+            let mut strengths = Vec::new();
+            if id_lower.contains("o1") || id_lower.contains("o3") { strengths.push("reasoning".to_string()); }
+            if has_vision { strengths.push("vision".to_string()); }
+            let mut input_mods = vec!["text".to_string()];
+            if has_vision { input_mods.push("image".to_string()); }
+
+            let id_clone = id.clone();
+            models.push(crate::types::FullModelInfo {
+                id, name: id_clone, provider: "openai".to_string(),
+                description: Some("OpenAI model".to_string()), context_window: ctx, max_output_tokens: ctx,
+                capabilities: crate::types::ModelCapabilities {
+                    function_calling: has_tools, vision: has_vision, streaming: true,
+                    json_mode: has_tools, caching: false, max_tokens: ctx, context_window: ctx,
+                    input_modalities: input_mods, output_modalities: vec!["text".to_string()], strengths,
+                },
+                pricing: None, created: m["created"].as_u64().unwrap_or(0), available: true,
+            });
+        }
+        Ok(models)
+    }
+
+    /// Hardcoded fallback models.
+    fn known_models_lookup(&self) -> Vec<crate::types::FullModelInfo> {
+        vec![
+            crate::types::FullModelInfo {
+                id: "gpt-4o".to_string(), name: "GPT-4o".to_string(), provider: "openai".to_string(),
+                description: Some("Optimized GPT-4".to_string()), context_window: 128000, max_output_tokens: 16384,
+                capabilities: crate::types::ModelCapabilities {
+                    function_calling: true, vision: true, streaming: true, json_mode: true, caching: true,
+                    max_tokens: 16384, context_window: 128000,
+                    input_modalities: vec!["text".to_string(), "image".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                    strengths: vec!["coding".to_string(), "reasoning".to_string()],
+                },
+                pricing: Some(crate::types::ModelPricing {
+                    prompt_tokens: 0.005, completion_tokens: 0.015, image_tokens: None, is_free: false,
+                }),
+                created: 1714073600, available: true,
+            },
+            crate::types::FullModelInfo {
+                id: "gpt-4o-mini".to_string(), name: "GPT-4o Mini".to_string(), provider: "openai".to_string(),
+                description: Some("Small, fast model".to_string()), context_window: 128000, max_output_tokens: 16384,
+                capabilities: crate::types::ModelCapabilities {
+                    function_calling: true, vision: true, streaming: true, json_mode: true, caching: false,
+                    max_tokens: 16384, context_window: 128000,
+                    input_modalities: vec!["text".to_string(), "image".to_string()],
+                    output_modalities: vec!["text".to_string()], strengths: vec![],
+                },
+                pricing: Some(crate::types::ModelPricing {
+                    prompt_tokens: 0.00015, completion_tokens: 0.0006, image_tokens: None, is_free: false,
+                }),
+                created: 1718192000, available: true,
+            },
+        ]
+    }
 }
 
 #[async_trait]
@@ -258,16 +364,9 @@ impl LLMProvider for OpenAIProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        vec![
-            "gpt-4".to_string(),
-            "gpt-4-turbo".to_string(),
-            "gpt-4o".to_string(),
-            "gpt-4o-mini".to_string(),
-            "gpt-3.5-turbo".to_string(),
-            "o1".to_string(),
-            "o1-mini".to_string(),
-            "o1-preview".to_string(),
-        ]
+        // Cannot hardcode — the OpenAI Chat Completions API protocol is used by
+        // many providers (LM Studio, LocalAI, vLLM, etc.). Live discovery only.
+        vec![]
     }
 
     fn supports_function_calling(&self, model: &str) -> bool {
@@ -278,149 +377,12 @@ impl LLMProvider for OpenAIProvider {
         }
     }
 
+    /// Fetch models from live API. Falls back to empty list on error.
     async fn list_models(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        Ok(vec![
-            crate::types::FullModelInfo {
-                id: "gpt-4".to_string(),
-                name: "GPT-4".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Most capable model, optimized for complex tasks".to_string()),
-                context_window: 8192,
-                max_output_tokens: 8192,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 8192,
-                    context_window: 8192,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.03,
-                    completion_tokens: 0.06,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1687882411,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "gpt-4-turbo".to_string(),
-                name: "GPT-4 Turbo".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Higher speed at 2x the throughput of GPT-4".to_string()),
-                context_window: 128000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 4096,
-                    context_window: 128000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.01,
-                    completion_tokens: 0.03,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1694122800,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "gpt-3.5-turbo".to_string(),
-                name: "GPT-3.5 Turbo".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Fast and efficient model for most tasks".to_string()),
-                context_window: 4096,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: false,
-                    streaming: true,
-                    json_mode: true,
-                    caching: false,
-                    max_tokens: 4096,
-                    context_window: 4096,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.0005,
-                    completion_tokens: 0.0015,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1684758360,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4 Optimized".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Optimized version of GPT-4 for faster responses".to_string()),
-                context_window: 128000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 4096,
-                    context_window: 128000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.005,
-                    completion_tokens: 0.015,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1714073600,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "gpt-4o-mini".to_string(),
-                name: "GPT-4 Optimized Mini".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Lightweight version for efficiency".to_string()),
-                context_window: 128000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: false,
-                    max_tokens: 4096,
-                    context_window: 128000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.00015,
-                    completion_tokens: 0.0006,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1718192000,
-                available: true,
-            },
-        ])
+        match self.fetch_models_live().await {
+            Ok(models) if !models.is_empty() => Ok(models),
+            _ => Ok(vec![]),
+        }
     }
 
     async fn chat_completion(

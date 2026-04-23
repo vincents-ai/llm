@@ -175,6 +175,71 @@ impl OllamaProvider {
 
         Ok(response.status().is_success())
     }
+
+    /// Fetch models from local Ollama instance.
+    async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
+        let resp = self.client
+            .get(&format!("{}/api/tags", self.get_base_url()))
+            .send()
+            .await
+            .map_err(|e| crate::error::LLMError::HttpError {
+                message: format!("Failed to fetch Ollama models: {}", e),
+                status_code: None,
+                body: None,
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(crate::error::LLMError::HttpError {
+                message: format!("Ollama /api/tags returned {}", resp.status()),
+                status_code: Some(resp.status().as_u16()),
+                body: resp.text().await.ok(),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(|e| crate::error::LLMError::SerializationError {
+            message: e.to_string(),
+            context: Some("Failed to parse Ollama models response".to_string()),
+        })?;
+        let data = json["models"].as_array()
+            .ok_or_else(|| crate::error::LLMError::SerializationError {
+                message: "Missing 'models' array".to_string(),
+                context: None,
+            })?;
+
+        let models: Vec<crate::types::FullModelInfo> = data.iter().filter_map(|m| {
+            let name = m["name"].as_str()?.to_string();
+            let family = m["details"]["family"].as_str().unwrap_or("unknown").to_string();
+            let param_size = m["details"]["parameter_size"].as_str().unwrap_or("?").to_string();
+            let quant = m["details"]["quantization_level"].as_str().unwrap_or("?").to_string();
+            let name_lower = name.to_lowercase();
+            let has_tools = family == "llama" || family == "qwen2" || family == "mistral";
+            let mut strengths = Vec::new();
+            if name_lower.contains("coder") || name_lower.contains("code") { strengths.push("coding".to_string()); }
+            if name_lower.contains("reason") || name_lower.contains("deepseek-r") { strengths.push("reasoning".to_string()); }
+
+            Some(crate::types::FullModelInfo {
+                id: name.clone(), name: format!("{} ({}, {})", name, param_size, quant),
+                provider: "ollama".to_string(), description: Some(format!("Local Ollama ({})", family)),
+                context_window: 8192, max_output_tokens: 4096,
+                capabilities: crate::types::ModelCapabilities {
+                    function_calling: has_tools, vision: false, streaming: true, json_mode: false,
+                    caching: false, max_tokens: 4096, context_window: 8192,
+                    input_modalities: vec!["text".to_string()], output_modalities: vec!["text".to_string()],
+                    strengths,
+                },
+                pricing: Some(crate::types::ModelPricing {
+                    prompt_tokens: 0.0, completion_tokens: 0.0, image_tokens: None, is_free: true,
+                }),
+                created: 0, available: true,
+            })
+        }).collect();
+
+        Ok(models)
+    }
+
+    fn fallback_models(&self) -> Vec<crate::types::FullModelInfo> {
+        vec![]
+    }
 }
 
 #[async_trait]
@@ -184,16 +249,9 @@ impl LLMProvider for OllamaProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        vec![
-            "llama3.1:8b".to_string(),
-            "llama3.1:70b".to_string(),
-            "llama3.2:1b".to_string(),
-            "llama3.2:3b".to_string(),
-            "mistral".to_string(),
-            "codellama".to_string(),
-            "deepseek-coder".to_string(),
-            "qwen2.5-coder".to_string(),
-        ]
+        // Cannot hardcode — Ollama serves whatever the user has pulled.
+        // Live discovery via /api/tags is the source of truth.
+        vec![]
     }
 
     fn supports_function_calling(&self, model: &str) -> bool {
@@ -278,7 +336,7 @@ impl LLMProvider for OllamaProvider {
                     prompt_tokens: 0.0,
                     completion_tokens: 0.0,
                     image_tokens: None,
-                    is_free: false,
+                    is_free: true,
                 }),
                 created: 0,
                 available: true,

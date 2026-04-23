@@ -344,6 +344,74 @@ impl AnthropicProvider {
                 context: Some("Failed to parse Anthropic response".to_string()),
             })
     }
+
+    /// Fetch models from the live Anthropic API.
+    async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
+        let base = self.config.base_url.as_deref()
+            .unwrap_or("https://api.anthropic.com");
+
+        let resp = self.client
+            .get(&format!("{}/v1/models", base))
+            .header("Content-Type", "application/json")
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| LLMError::HttpError {
+                message: format!("Failed to fetch Anthropic models: {}", e),
+                status_code: None,
+                body: None,
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(LLMError::HttpError {
+                message: format!("Anthropic /v1/models returned {}", resp.status()),
+                status_code: Some(resp.status().as_u16()),
+                body: resp.text().await.ok(),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(|e| LLMError::SerializationError {
+            message: e.to_string(),
+            context: Some("Failed to parse models response".to_string()),
+        })?;
+        let data = json["data"].as_array()
+            .ok_or_else(|| LLMError::SerializationError {
+                message: "Missing 'data' array".to_string(),
+                context: None,
+            })?;
+
+        let mut models: Vec<crate::types::FullModelInfo> = Vec::new();
+
+        for m in data {
+            let id = match m["id"].as_str() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            let display_name = m["display_name"].as_str().unwrap_or(&id).to_string();
+            let id_lower = id.to_lowercase();
+            let has_vision = id_lower.contains("claude-3");
+            let has_tools = id_lower.contains("claude-3") || id_lower.contains("claude-4");
+            let ctx: u32 = 200000;
+
+            let mut strengths = vec!["reasoning".to_string(), "coding".to_string()];
+            if has_vision { strengths.push("vision".to_string()); }
+
+            models.push(crate::types::FullModelInfo {
+                id, name: display_name, provider: "anthropic".to_string(),
+                description: None, context_window: ctx, max_output_tokens: 8192,
+                capabilities: crate::types::ModelCapabilities {
+                    function_calling: has_tools, vision: has_vision, streaming: true,
+                    json_mode: true, caching: true, max_tokens: 8192, context_window: ctx,
+                    input_modalities: vec!["text".to_string(), "image".to_string()],
+                    output_modalities: vec!["text".to_string()], strengths,
+                },
+                pricing: None, created: 0, available: true,
+            });
+        }
+        Ok(models)
+    }
 }
 
 #[async_trait]
@@ -353,101 +421,17 @@ impl LLMProvider for AnthropicProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        vec![
-            "claude-3-5-sonnet-20241022".to_string(),
-            "claude-3-5-sonnet".to_string(),
-            "claude-3-opus-20240229".to_string(),
-            "claude-3-haiku-20240307".to_string(),
-        ]
+        // Cannot hardcode — the Anthropic Messages API protocol is used by
+        // many providers (Bedrock, Vertex, proxies). Live discovery only.
+        vec![]
     }
 
+    /// Fetch models from live API. Falls back to empty list.
     async fn list_models(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        Ok(vec![
-            crate::types::FullModelInfo {
-                id: "claude-3-5-sonnet-20241022".to_string(),
-                name: "Claude 3.5 Sonnet".to_string(),
-                provider: "anthropic".to_string(),
-                description: Some("Latest Claude model with improved reasoning and code skills".to_string()),
-                context_window: 200000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 4096,
-                    context_window: 200000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.003,
-                    completion_tokens: 0.015,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1724076800,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "claude-3-opus-20240229".to_string(),
-                name: "Claude 3 Opus".to_string(),
-                provider: "anthropic".to_string(),
-                description: Some("Most capable Claude model for complex reasoning tasks".to_string()),
-                context_window: 200000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 4096,
-                    context_window: 200000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.015,
-                    completion_tokens: 0.075,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1709251200,
-                available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "claude-3-haiku-20240307".to_string(),
-                name: "Claude 3 Haiku".to_string(),
-                provider: "anthropic".to_string(),
-                description: Some("Fast and compact Claude model for simple tasks".to_string()),
-                context_window: 200000,
-                max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: false,
-                    max_tokens: 4096,
-                    context_window: 200000,
-                    input_modalities: vec!["text".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.00080,
-                    completion_tokens: 0.004,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1709251200,
-                available: true,
-            },
-        ])
+        match self.fetch_models_live().await {
+            Ok(models) if !models.is_empty() => Ok(models),
+            _ => Ok(vec![]),
+        }
     }
 
     async fn chat_completion(
