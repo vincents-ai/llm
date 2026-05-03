@@ -63,8 +63,17 @@ pub enum ChatMessage {
 }
 
 impl ChatMessage {
-    /// Create a system message
+    /// Create a system message (no cache control)
     pub fn system(content: impl Into<String>) -> Self {
+        ChatMessage::System {
+            content: content.into(),
+            name: None,
+        }
+    }
+
+    /// Create a system message with cache control for prompt caching
+    /// Note: cache control is now handled via ChatCompletionRequest::cache_system field
+    pub fn system_with_cache(content: impl Into<String>) -> Self {
         ChatMessage::System {
             content: content.into(),
             name: None,
@@ -107,6 +116,28 @@ impl ChatMessage {
             ChatMessage::Assistant { .. } => MessageRole::Assistant,
             ChatMessage::Function { .. } => MessageRole::Function,
             ChatMessage::Tool { .. } => MessageRole::Tool,
+        }
+    }
+}
+
+/// Cache control for Anthropic prompt caching.
+/// When set on a system or user message, the API will cache the prefix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheControl {
+    /// Cache type - typically "ephemeral" for Anthropic
+    #[serde(default = "default_cache_type")]
+    pub r#type: String,
+}
+
+fn default_cache_type() -> String {
+    "ephemeral".to_string()
+}
+
+impl CacheControl {
+    /// Create a new cache control with "ephemeral" type
+    pub fn ephemeral() -> Self {
+        Self {
+            r#type: "ephemeral".to_string(),
         }
     }
 }
@@ -263,6 +294,10 @@ pub struct ChatCompletionRequest {
     /// Additional provider-specific parameters
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, serde_json::Value>,
+
+    /// Enable prompt caching for system messages (Anthropic only)
+    #[serde(default)]
+    pub cache_system: bool,
 }
 
 impl Default for ChatCompletionRequest {
@@ -281,6 +316,7 @@ impl Default for ChatCompletionRequest {
             logit_bias: HashMap::new(),
             user: None,
             extra_params: HashMap::new(),
+            cache_system: false,
         }
     }
 }

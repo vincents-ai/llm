@@ -423,6 +423,9 @@ impl LLMProvider for OpenAIProvider {
             if let Some(freq) = request.frequency_penalty {
                 obj.insert("frequency_penalty".to_string(), json!(freq));
             }
+            if !request.logit_bias.is_empty() {
+                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
+            }
             for (key, value) in &request.extra_params {
                 obj.insert(key.clone(), value.clone());
             }
@@ -641,6 +644,9 @@ impl LLMProvider for OpenAIProvider {
             }
             if let Some(freq) = request.frequency_penalty {
                 obj.insert("frequency_penalty".to_string(), json!(freq));
+            }
+            if !request.logit_bias.is_empty() {
+                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
             }
             for (key, value) in &request.extra_params {
                 obj.insert(key.clone(), value.clone());

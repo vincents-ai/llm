@@ -309,6 +309,9 @@ impl LLMProvider for OpenRouterProvider {
             if let Some(freq) = request.frequency_penalty {
                 obj.insert("frequency_penalty".to_string(), json!(freq));
             }
+            if !request.logit_bias.is_empty() {
+                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
+            }
         }
 
         let mut request_builder = self.client
@@ -373,7 +376,10 @@ impl LLMProvider for OpenRouterProvider {
                 let content = msg["content"].as_str().unwrap_or("");
 
                 let message = match role {
-                    "system" => ChatMessage::system(content),
+                    "system" => ChatMessage::System {
+                        content: content.to_string(),
+                        name: None,
+                    },
                     "user" => ChatMessage::user(content),
                     _ => ChatMessage::assistant(content),
                 };

@@ -96,13 +96,14 @@ impl AnthropicProvider {
     }
 
     fn convert_messages(&self, messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
-        let mut system_prompt: Option<String> = None;
+        let mut system_value: Option<String> = None;
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
         for msg in messages {
             match msg {
                 ChatMessage::System { content, .. } => {
-                    system_prompt = Some(match system_prompt {
+                    // Merge system prompts
+                    system_value = Some(match system_value.take() {
                         Some(existing) => format!("{}\n\n{}", existing, content),
                         None => content.clone(),
                     });
@@ -234,7 +235,7 @@ impl AnthropicProvider {
             }
         }
 
-        (system_prompt, anthropic_messages)
+        (system_value, anthropic_messages)
     }
 
     fn convert_response(&self, json: &serde_json::Value, model: &str) -> Result<ChatCompletionResponse> {
@@ -444,7 +445,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_prompt, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages);
 
         let mut body = json!({
             "model": model,
@@ -452,8 +453,20 @@ impl LLMProvider for AnthropicProvider {
             "max_tokens": request.max_tokens.unwrap_or(1024),
         });
 
-        if let Some(sys) = system_prompt {
-            body["system"] = json!(sys);
+        // Handle system field - support caching via cache_system flag
+        if let Some(sys) = system_value {
+            if request.cache_system {
+                // Format as array with cache_control for prompt caching
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": {
+                        "type": "ephemeral"
+                    }
+                }]);
+            } else {
+                body["system"] = json!(sys);
+            }
         }
 
         if let Some(obj) = body.as_object_mut() {
@@ -484,7 +497,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_prompt, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -493,8 +506,20 @@ impl LLMProvider for AnthropicProvider {
             "stream": true,
         });
 
-        if let Some(sys) = system_prompt {
-            body["system"] = json!(sys);
+        // Handle system field - support caching via cache_system flag
+        if let Some(sys) = system_value {
+            if request.cache_system {
+                // Format as array with cache_control for prompt caching
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": {
+                        "type": "ephemeral"
+                    }
+                }]);
+            } else {
+                body["system"] = json!(sys);
+            }
         }
 
         if let Some(obj) = body.as_object_mut() {
@@ -620,7 +645,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_prompt, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages);
 
         let tools: Vec<serde_json::Value> = functions.iter().map(|f| {
             let schema = f.parameters.as_ref()
@@ -644,8 +669,20 @@ impl LLMProvider for AnthropicProvider {
             "tool_choice": {"type": "auto"}
         });
 
-        if let Some(sys) = system_prompt {
-            body["system"] = json!(sys);
+        // Handle system field - support caching via cache_system flag
+        if let Some(sys) = system_value {
+            if request.cache_system {
+                // Format as array with cache_control for prompt caching
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": {
+                        "type": "ephemeral"
+                    }
+                }]);
+            } else {
+                body["system"] = json!(sys);
+            }
         }
 
         if let Some(obj) = body.as_object_mut() {
