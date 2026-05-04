@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,9 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     /// Rate limits
     pub rate_limits: Option<RateLimitConfig>,
+    /// Per-provider circuit breaker configuration override.
+    /// When None, the default from ProviderManagerConfig is used.
+    pub circuit_breaker: Option<CircuitBreakerOverrides>,
     /// Extra parameters
     pub extra_params: HashMap<String, serde_json::Value>,
 }
@@ -35,6 +39,7 @@ impl Default for ProviderConfig {
             default_model: None,
             timeout_secs: 60,
             rate_limits: None,
+            circuit_breaker: None,
             extra_params: HashMap::new(),
         }
     }
@@ -49,6 +54,42 @@ pub struct RateLimitConfig {
     pub tokens_per_minute: u64,
     /// Requests per day
     pub requests_per_day: Option<u64>,
+}
+
+/// Per-provider circuit breaker configuration overrides.
+/// All fields are optional; unset fields fall back to the global default
+/// from `ProviderManagerConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerOverrides {
+    /// Failures within window required to trip the breaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<u32>,
+    /// Successes in HalfOpen required to close the breaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<u32>,
+    /// Seconds the breaker stays Open before transitioning to HalfOpen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Sliding window size in seconds for counting failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+    /// Max concurrent probe requests in HalfOpen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub half_open_max_probes: Option<u32>,
+}
+
+impl CircuitBreakerOverrides {
+    /// Merge these overrides into a base config, producing a final
+    /// `CircuitBreakerConfig`.
+    pub fn merge_into(&self, base: &crate::circuit_breaker::CircuitBreakerConfig) -> crate::circuit_breaker::CircuitBreakerConfig {
+        crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: self.failure_threshold.unwrap_or(base.failure_threshold),
+            success_threshold: self.success_threshold.unwrap_or(base.success_threshold),
+            timeout: self.timeout_secs.map(Duration::from_secs).unwrap_or(base.timeout),
+            window: self.window_secs.map(Duration::from_secs).unwrap_or(base.window),
+            half_open_max_probes: self.half_open_max_probes.unwrap_or(base.half_open_max_probes),
+        }
+    }
 }
 
 /// LLM configuration for the application

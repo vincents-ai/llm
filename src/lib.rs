@@ -54,8 +54,10 @@ pub use rate_limiter::{RateLimiter, RateLimitStatus, RetryConfig, RetryPolicy, R
 pub use provider_manager::ProviderManager;
 pub use telemetry::{LlmTelemetryAttributes, LlmTelemetryRecorder, TelemetrySpan, NoopTelemetryRecorder, TracingTelemetryRecorder};
 pub use token_counter::{TokenCounter, TokenCounterConfig, TokenCount, TokenCountingError};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitState, CircuitOpenError};
 
 pub mod provider;
+pub mod circuit_breaker;
 mod cost_tracker;
 mod rate_limiter;
 pub mod provider_manager;
