@@ -287,7 +287,6 @@ impl RetryPolicy {
             last_delay_ms: 0,
             total_elapsed_ms: 0,
         }
-
     }
 
     /// Reset the policy for a new operation
@@ -340,7 +339,10 @@ impl RetryPolicy {
 
     /// Get the number of remaining retries
     pub fn remaining_retries(&self) -> u32 {
-        self.config.strategy.max_retries().saturating_sub(self.current_attempt)
+        self.config
+            .strategy
+            .max_retries()
+            .saturating_sub(self.current_attempt)
     }
 }
 

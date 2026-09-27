@@ -1,10 +1,10 @@
 use cucumber::{gherkin::Step, World};
 use std::collections::HashMap;
-use vincents_llm::types::FullModelInfo;
 use vincents_llm::anthropic::AnthropicProvider;
-use vincents_llm::openai::OpenAIProvider;
 use vincents_llm::ollama::OllamaProvider;
+use vincents_llm::openai::OpenAIProvider;
 use vincents_llm::provider::LLMProvider;
+use vincents_llm::types::FullModelInfo;
 
 #[derive(World, Debug)]
 pub struct ModelListingWorld {
@@ -42,12 +42,10 @@ async fn initialize_providers(world: &mut ModelListingWorld) {
     }
 
     // Initialize Ollama provider
-    if let Ok(provider) = OllamaProvider::with_config(
-        vincents_llm::ollama::OllamaConfig {
-            host: "http://localhost:11434".to_string(),
-            default_model: Some("llama3.1:8b".to_string()),
-        },
-    ) {
+    if let Ok(provider) = OllamaProvider::with_config(vincents_llm::ollama::OllamaConfig {
+        host: "http://localhost:11434".to_string(),
+        default_model: Some("llama3.1:8b".to_string()),
+    }) {
         world.providers.insert(
             "ollama".to_string(),
             Box::new(provider) as Box<dyn LLMProvider>,
@@ -112,14 +110,14 @@ async fn verify_model_list(world: &mut ModelListingWorld, step: &Step) {
         panic!("Error occurred: {:?}", world.current_error);
     }
 
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
         let model_id = &row[0];
         let expected_name = &row[1];
-        let expected_context = row[2].parse::<u32>().expect("Context window should be a number");
+        let expected_context = row[2]
+            .parse::<u32>()
+            .expect("Context window should be a number");
         let expected_capabilities: Vec<&str> = row[3].split(',').collect();
 
         let model = world
@@ -142,10 +140,26 @@ async fn verify_model_list(world: &mut ModelListingWorld, step: &Step) {
         for capability in expected_capabilities {
             let capability = capability.trim();
             match capability {
-                "vision" => assert!(model.capabilities.vision, "Vision not supported for {}", model_id),
-                "tools" => assert!(model.capabilities.function_calling, "Tools not supported for {}", model_id),
-                "json" => assert!(model.capabilities.json_mode, "JSON mode not supported for {}", model_id),
-                "caching" => assert!(model.capabilities.caching, "Caching not supported for {}", model_id),
+                "vision" => assert!(
+                    model.capabilities.vision,
+                    "Vision not supported for {}",
+                    model_id
+                ),
+                "tools" => assert!(
+                    model.capabilities.function_calling,
+                    "Tools not supported for {}",
+                    model_id
+                ),
+                "json" => assert!(
+                    model.capabilities.json_mode,
+                    "JSON mode not supported for {}",
+                    model_id
+                ),
+                "caching" => assert!(
+                    model.capabilities.caching,
+                    "Caching not supported for {}",
+                    model_id
+                ),
                 _ => {}
             }
         }
@@ -158,9 +172,7 @@ async fn verify_model_pricing(world: &mut ModelListingWorld, step: &Step) {
         panic!("Error occurred: {:?}", world.current_error);
     }
 
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
         let model_id = &row[0];
@@ -179,13 +191,19 @@ async fn verify_model_pricing(world: &mut ModelListingWorld, step: &Step) {
             .unwrap_or_else(|| panic!("Pricing not found for {}", model_id));
 
         // Allow small floating-point differences
-        assert!((pricing.prompt_tokens - expected_input).abs() < 0.00001,
+        assert!(
+            (pricing.prompt_tokens - expected_input).abs() < 0.00001,
             "Input pricing mismatch for {}: expected {}, got {}",
-            model_id, expected_input, pricing.prompt_tokens
+            model_id,
+            expected_input,
+            pricing.prompt_tokens
         );
-        assert!((pricing.completion_tokens - expected_output).abs() < 0.00001,
+        assert!(
+            (pricing.completion_tokens - expected_output).abs() < 0.00001,
             "Output pricing mismatch for {}: expected {}, got {}",
-            model_id, expected_output, pricing.completion_tokens
+            model_id,
+            expected_output,
+            pricing.completion_tokens
         );
     }
 }
@@ -199,14 +217,15 @@ async fn check_ollama_server(_world: &mut ModelListingWorld, host: String) {
 
 #[cucumber::then(expr = "the model list should not be empty")]
 async fn verify_non_empty_list(world: &mut ModelListingWorld) {
-    assert!(!world.current_models.is_empty(), "Model list should not be empty");
+    assert!(
+        !world.current_models.is_empty(),
+        "Model list should not be empty"
+    );
 }
 
 #[cucumber::then(expr = "each model should have:")]
 async fn verify_model_fields(world: &mut ModelListingWorld, step: &Step) {
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for model in &world.current_models {
         for row in table.rows.iter().skip(1) {
@@ -258,9 +277,7 @@ async fn verify_model_info_fields(world: &mut ModelListingWorld, step: &Step) {
     assert!(!world.current_models.is_empty(), "No models to verify");
     let model = &world.current_models[0];
 
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
         let field = &row[0];
@@ -274,7 +291,10 @@ async fn verify_model_info_fields(world: &mut ModelListingWorld, step: &Step) {
                 assert!(!model.name.is_empty(), "Name should be a non-empty string");
             }
             ("context_window", "number") => {
-                assert!(model.context_window > 0, "Context window should be a positive number");
+                assert!(
+                    model.context_window > 0,
+                    "Context window should be a positive number"
+                );
             }
             ("capabilities", "array") => {
                 // Capabilities object exists
@@ -297,19 +317,29 @@ async fn verify_capabilities(world: &mut ModelListingWorld, step: &Step) {
     assert!(!world.current_models.is_empty(), "No models to verify");
     let model = &world.current_models[0];
 
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
         let capability = &row[0];
         let supported = &row[1] == "true";
 
         match capability {
-            "vision" => assert_eq!(model.capabilities.vision, supported, "Vision capability mismatch"),
-            "tools" => assert_eq!(model.capabilities.function_calling, supported, "Tools capability mismatch"),
-            "json_mode" => assert_eq!(model.capabilities.json_mode, supported, "JSON mode capability mismatch"),
-            "caching" => assert_eq!(model.capabilities.caching, supported, "Caching capability mismatch"),
+            "vision" => assert_eq!(
+                model.capabilities.vision, supported,
+                "Vision capability mismatch"
+            ),
+            "tools" => assert_eq!(
+                model.capabilities.function_calling, supported,
+                "Tools capability mismatch"
+            ),
+            "json_mode" => assert_eq!(
+                model.capabilities.json_mode, supported,
+                "JSON mode capability mismatch"
+            ),
+            "caching" => assert_eq!(
+                model.capabilities.caching, supported,
+                "Caching capability mismatch"
+            ),
             _ => {}
         }
     }
@@ -338,9 +368,7 @@ async fn verify_required_fields(world: &mut ModelListingWorld, step: &Step) {
         panic!("Error occurred: {:?}", world.current_error);
     }
 
-    let table = step
-        .table()
-        .expect("Step should have a table");
+    let table = step.table().expect("Step should have a table");
 
     for model in &world.current_models {
         for row in table.rows.iter().skip(1) {

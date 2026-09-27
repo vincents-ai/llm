@@ -5,15 +5,15 @@
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use serde_json::json;
+use std::pin::Pin;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
+use crate::error::{LLMError, Result};
 use crate::provider::LLMProvider;
-use crate::RateLimitStatus;
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 /// Anthropic Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +46,7 @@ impl AnthropicProvider {
     /// Create a new Anthropic provider
     pub async fn new(api_key: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         Ok(Self {
             config: AnthropicConfig {
                 api_key: api_key.into(),
@@ -79,12 +79,17 @@ impl AnthropicProvider {
     }
 
     fn get_base_url(&self) -> &str {
-        self.config.base_url.as_deref()
+        self.config
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.anthropic.com/v1")
     }
 
     /// Create with a custom endpoint (for Anthropic-compatible proxies such as Z.ai).
-    pub async fn with_endpoint(api_key: impl Into<String>, base_url: impl Into<String>) -> Result<Self> {
+    pub async fn with_endpoint(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self> {
         Ok(Self {
             config: AnthropicConfig {
                 api_key: api_key.into(),
@@ -95,7 +100,10 @@ impl AnthropicProvider {
         })
     }
 
-    fn convert_messages(&self, messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
+    fn convert_messages(
+        &self,
+        messages: &[ChatMessage],
+    ) -> (Option<String>, Vec<serde_json::Value>) {
         let mut system_value: Option<String> = None;
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -122,7 +130,11 @@ impl AnthropicProvider {
                     }
                     anthropic_messages.push(user_msg);
                 }
-                ChatMessage::Assistant { content, tool_calls, .. } => {
+                ChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                    ..
+                } => {
                     if let Some(calls) = tool_calls {
                         if !calls.is_empty() {
                             let mut content_blocks: Vec<serde_json::Value> = Vec::new();
@@ -134,8 +146,9 @@ impl AnthropicProvider {
                             for call in calls {
                                 match call {
                                     ToolCall::Function(FunctionCall::Custom(custom)) => {
-                                        let input: serde_json::Value = serde_json::from_str(&custom.arguments)
-                                            .unwrap_or(json!({}));
+                                        let input: serde_json::Value =
+                                            serde_json::from_str(&custom.arguments)
+                                                .unwrap_or(json!({}));
                                         content_blocks.push(json!({
                                             "type": "tool_use",
                                             "id": custom.id.as_deref().unwrap_or("unknown"),
@@ -174,7 +187,11 @@ impl AnthropicProvider {
                         "content": text
                     }));
                 }
-                ChatMessage::Tool { tool_call_id, content, .. } => {
+                ChatMessage::Tool {
+                    tool_call_id,
+                    content,
+                    ..
+                } => {
                     let tool_result = json!({
                         "type": "tool_result",
                         "tool_use_id": tool_call_id,
@@ -238,7 +255,11 @@ impl AnthropicProvider {
         (system_value, anthropic_messages)
     }
 
-    fn convert_response(&self, json: &serde_json::Value, model: &str) -> Result<ChatCompletionResponse> {
+    fn convert_response(
+        &self,
+        json: &serde_json::Value,
+        model: &str,
+    ) -> Result<ChatCompletionResponse> {
         let id = json["id"].as_str().unwrap_or("unknown").to_string();
         let created = json["created"].as_u64().unwrap_or(0);
         let model = json["model"].as_str().unwrap_or(model).to_string();
@@ -261,12 +282,15 @@ impl AnthropicProvider {
                     let tool_id = block["id"].as_str().unwrap_or("unknown").to_string();
                     let name = block["name"].as_str().unwrap_or("").to_string();
                     let input = &block["input"];
-                    let arguments = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-                    tool_calls.push(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
-                        id: Some(tool_id),
-                        name,
-                        arguments,
-                    })));
+                    let arguments =
+                        serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                    tool_calls.push(ToolCall::Function(FunctionCall::Custom(
+                        CustomFunctionCall {
+                            id: Some(tool_id),
+                            name,
+                            arguments,
+                        },
+                    )));
                 }
                 _ => {}
             }
@@ -281,7 +305,11 @@ impl AnthropicProvider {
 
         let message = if !tool_calls.is_empty() {
             ChatMessage::Assistant {
-                content: if text_parts.is_empty() { None } else { Some(text_parts.join("")) },
+                content: if text_parts.is_empty() {
+                    None
+                } else {
+                    Some(text_parts.join(""))
+                },
                 tool_calls: Some(tool_calls),
                 name: None,
             }
@@ -299,7 +327,8 @@ impl AnthropicProvider {
         let usage = json["usage"].as_object().map(|u| Usage {
             prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
             completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32 + u["output_tokens"].as_u64().unwrap_or(0) as u32,
+            total_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32
+                + u["output_tokens"].as_u64().unwrap_or(0) as u32,
         });
 
         Ok(ChatCompletionResponse {
@@ -315,7 +344,8 @@ impl AnthropicProvider {
 
     async fn send_request(&self, body: serde_json::Value) -> Result<serde_json::Value> {
         let messages_url = format!("{}/messages", self.get_base_url());
-        let response = self.client
+        let response = self
+            .client
             .post(&messages_url)
             .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -339,7 +369,9 @@ impl AnthropicProvider {
             });
         }
 
-        response.json().await
+        response
+            .json()
+            .await
             .map_err(|e| LLMError::SerializationError {
                 message: e.to_string(),
                 context: Some("Failed to parse Anthropic response".to_string()),
@@ -348,10 +380,14 @@ impl AnthropicProvider {
 
     /// Fetch models from the live Anthropic API.
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        let base = self.config.base_url.as_deref()
+        let base = self
+            .config
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.anthropic.com");
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&format!("{}/v1/models", base))
             .header("Content-Type", "application/json")
             .header("x-api-key", &self.config.api_key)
@@ -372,11 +408,15 @@ impl AnthropicProvider {
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse models response".to_string()),
-        })?;
-        let data = json["data"].as_array()
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse models response".to_string()),
+                })?;
+        let data = json["data"]
+            .as_array()
             .ok_or_else(|| LLMError::SerializationError {
                 message: "Missing 'data' array".to_string(),
                 context: None,
@@ -397,18 +437,32 @@ impl AnthropicProvider {
             let ctx: u32 = 200000;
 
             let mut strengths = vec!["reasoning".to_string(), "coding".to_string()];
-            if has_vision { strengths.push("vision".to_string()); }
+            if has_vision {
+                strengths.push("vision".to_string());
+            }
 
             models.push(crate::types::FullModelInfo {
-                id, name: display_name, provider: "anthropic".to_string(),
-                description: None, context_window: ctx, max_output_tokens: 8192,
+                id,
+                name: display_name,
+                provider: "anthropic".to_string(),
+                description: None,
+                context_window: ctx,
+                max_output_tokens: 8192,
                 capabilities: crate::types::ModelCapabilities {
-                    function_calling: has_tools, vision: has_vision, streaming: true,
-                    json_mode: true, caching: true, max_tokens: 8192, context_window: ctx,
+                    function_calling: has_tools,
+                    vision: has_vision,
+                    streaming: true,
+                    json_mode: true,
+                    caching: true,
+                    max_tokens: 8192,
+                    context_window: ctx,
                     input_modalities: vec!["text".to_string(), "image".to_string()],
-                    output_modalities: vec!["text".to_string()], strengths,
+                    output_modalities: vec!["text".to_string()],
+                    strengths,
                 },
-                pricing: None, created: 0, available: true,
+                pricing: None,
+                created: 0,
+                available: true,
             });
         }
         Ok(models)
@@ -532,7 +586,8 @@ impl LLMProvider for AnthropicProvider {
         }
 
         let messages_url = format!("{}/messages", self.get_base_url());
-        let response = self.client
+        let response = self
+            .client
             .post(&messages_url)
             .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -563,27 +618,27 @@ impl LLMProvider for AnthropicProvider {
             let mut chunk_count = 0;
 
             let mut stream = response.bytes_stream();
-            
+
             while let Ok(Some(bytes)) = stream.try_next().await {
                 let bytes_vec = bytes.to_vec();
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
-                
+
                 loop {
                     if let Some(pos) = buffer.find("\n") {
                         let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
-                        
+
                         if line.starts_with("data: ") {
                             let data = &line[6..];
                             if data.is_empty() {
                                 continue;
                             }
-                            
+
                             match serde_json::from_str::<serde_json::Value>(data) {
                                 Ok(json) => {
                                     let content = json["delta"]["text"].as_str().unwrap_or("");
-                                    
+
                                     if content.is_empty() {
                                         continue;
                                     }
@@ -647,19 +702,20 @@ impl LLMProvider for AnthropicProvider {
 
         let (system_value, messages) = self.convert_messages(&request.messages);
 
-        let tools: Vec<serde_json::Value> = functions.iter().map(|f| {
-            let schema = f.parameters.as_ref()
-                .cloned()
-                .unwrap_or(json!({
+        let tools: Vec<serde_json::Value> = functions
+            .iter()
+            .map(|f| {
+                let schema = f.parameters.as_ref().cloned().unwrap_or(json!({
                     "type": "object",
                     "properties": {}
                 }));
-            json!({
-                "name": f.name,
-                "description": f.description,
-                "input_schema": schema
+                json!({
+                    "name": f.name,
+                    "description": f.description,
+                    "input_schema": schema
+                })
             })
-        }).collect();
+            .collect();
 
         let mut body = json!({
             "model": model,
@@ -712,8 +768,7 @@ impl LLMProvider for AnthropicProvider {
             "claude-3-5-haiku",
             "claude-4",
         ];
-        KNOWN_MODELS.iter().any(|m| model.contains(m))
-            || model.contains("claude")
+        KNOWN_MODELS.iter().any(|m| model.contains(m)) || model.contains("claude")
     }
 
     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
@@ -748,14 +803,17 @@ impl LLMProvider for AnthropicProvider {
             _ => 15.0,
         };
 
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 
         let estimated_completion_tokens = request.max_tokens.unwrap_or(1000);
 
         let input_cost = estimated_prompt_tokens as f64 * input_cost_per_million / 1_000_000.0;
-        let output_cost = estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
+        let output_cost =
+            estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
 
         Ok(CostEstimate {
             input_cost,

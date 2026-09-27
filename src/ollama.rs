@@ -5,15 +5,15 @@
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use serde_json::json;
+use std::pin::Pin;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
+use crate::error::{LLMError, Result};
 use crate::provider::LLMProvider;
-use crate::RateLimitStatus;
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 /// Ollama Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +52,11 @@ fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
                 "content": content
             })
         }
-        ChatMessage::Assistant { content, tool_calls, .. } => {
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
             let mut obj = json!({
                 "role": "assistant",
                 "content": content.as_deref().unwrap_or("")
@@ -81,7 +85,11 @@ fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
             }
             obj
         }
-        ChatMessage::Tool { content, tool_call_id, .. } => {
+        ChatMessage::Tool {
+            content,
+            tool_call_id,
+            ..
+        } => {
             json!({
                 "role": "tool",
                 "content": content,
@@ -110,21 +118,27 @@ fn parse_tool_calls(tool_calls: &serde_json::Value) -> Option<Vec<ToolCall>> {
             let name = func.get("name")?.as_str()?.to_string();
             let arguments = func.get("arguments")?;
             let arguments_str = serde_json::to_string(arguments).ok()?;
-            Some(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
-                id: None,
-                name,
-                arguments: arguments_str,
-            })))
+            Some(ToolCall::Function(FunctionCall::Custom(
+                CustomFunctionCall {
+                    id: None,
+                    name,
+                    arguments: arguments_str,
+                },
+            )))
         })
         .collect();
-    if calls.is_empty() { None } else { Some(calls) }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
 }
 
 impl OllamaProvider {
     /// Create a new Ollama provider
     pub async fn new(host: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         Ok(Self {
             config: OllamaConfig {
                 host: host.into(),
@@ -163,7 +177,8 @@ impl OllamaProvider {
 
     /// Check if Ollama server is available
     pub async fn health_check(&self) -> Result<bool> {
-        let response = self.client
+        let response = self
+            .client
             .get(&format!("{}/api/version", self.get_base_url()))
             .send()
             .await
@@ -178,7 +193,8 @@ impl OllamaProvider {
 
     /// Fetch models from local Ollama instance.
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(&format!("{}/api/tags", self.get_base_url()))
             .send()
             .await
@@ -196,43 +212,76 @@ impl OllamaProvider {
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| crate::error::LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse Ollama models response".to_string()),
-        })?;
-        let data = json["models"].as_array()
-            .ok_or_else(|| crate::error::LLMError::SerializationError {
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| crate::error::LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse Ollama models response".to_string()),
+                })?;
+        let data = json["models"].as_array().ok_or_else(|| {
+            crate::error::LLMError::SerializationError {
                 message: "Missing 'models' array".to_string(),
                 context: None,
-            })?;
+            }
+        })?;
 
-        let models: Vec<crate::types::FullModelInfo> = data.iter().filter_map(|m| {
-            let name = m["name"].as_str()?.to_string();
-            let family = m["details"]["family"].as_str().unwrap_or("unknown").to_string();
-            let param_size = m["details"]["parameter_size"].as_str().unwrap_or("?").to_string();
-            let quant = m["details"]["quantization_level"].as_str().unwrap_or("?").to_string();
-            let name_lower = name.to_lowercase();
-            let has_tools = family == "llama" || family == "qwen2" || family == "mistral";
-            let mut strengths = Vec::new();
-            if name_lower.contains("coder") || name_lower.contains("code") { strengths.push("coding".to_string()); }
-            if name_lower.contains("reason") || name_lower.contains("deepseek-r") { strengths.push("reasoning".to_string()); }
+        let models: Vec<crate::types::FullModelInfo> = data
+            .iter()
+            .filter_map(|m| {
+                let name = m["name"].as_str()?.to_string();
+                let family = m["details"]["family"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                let param_size = m["details"]["parameter_size"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
+                let quant = m["details"]["quantization_level"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
+                let name_lower = name.to_lowercase();
+                let has_tools = family == "llama" || family == "qwen2" || family == "mistral";
+                let mut strengths = Vec::new();
+                if name_lower.contains("coder") || name_lower.contains("code") {
+                    strengths.push("coding".to_string());
+                }
+                if name_lower.contains("reason") || name_lower.contains("deepseek-r") {
+                    strengths.push("reasoning".to_string());
+                }
 
-            Some(crate::types::FullModelInfo {
-                id: name.clone(), name: format!("{} ({}, {})", name, param_size, quant),
-                provider: "ollama".to_string(), description: Some(format!("Local Ollama ({})", family)),
-                context_window: 8192, max_output_tokens: 4096,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: has_tools, vision: false, streaming: true, json_mode: false,
-                    caching: false, max_tokens: 4096, context_window: 8192,
-                    input_modalities: vec!["text".to_string()], output_modalities: vec!["text".to_string()],
-                    strengths,
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.0, completion_tokens: 0.0, image_tokens: None, is_free: true,
-                }),
-                created: 0, available: true,
+                Some(crate::types::FullModelInfo {
+                    id: name.clone(),
+                    name: format!("{} ({}, {})", name, param_size, quant),
+                    provider: "ollama".to_string(),
+                    description: Some(format!("Local Ollama ({})", family)),
+                    context_window: 8192,
+                    max_output_tokens: 4096,
+                    capabilities: crate::types::ModelCapabilities {
+                        function_calling: has_tools,
+                        vision: false,
+                        streaming: true,
+                        json_mode: false,
+                        caching: false,
+                        max_tokens: 4096,
+                        context_window: 8192,
+                        input_modalities: vec!["text".to_string()],
+                        output_modalities: vec!["text".to_string()],
+                        strengths,
+                    },
+                    pricing: Some(crate::types::ModelPricing {
+                        prompt_tokens: 0.0,
+                        completion_tokens: 0.0,
+                        image_tokens: None,
+                        is_free: true,
+                    }),
+                    created: 0,
+                    available: true,
+                })
             })
-        }).collect();
+            .collect();
 
         Ok(models)
     }
@@ -257,11 +306,19 @@ impl LLMProvider for OllamaProvider {
     fn supports_function_calling(&self, model: &str) -> bool {
         let model_lower = model.to_lowercase();
         let known_prefixes = [
-            "llama3.1", "llama3.2", "llama3.3", "llama4",
-            "mistral", "mistral-large", "mixtral",
-            "qwen2.5", "qwen3",
-            "deepseek-r1", "deepseek-coder-v2",
-            "gemma2", "gemma3",
+            "llama3.1",
+            "llama3.2",
+            "llama3.3",
+            "llama4",
+            "mistral",
+            "mistral-large",
+            "mixtral",
+            "qwen2.5",
+            "qwen3",
+            "deepseek-r1",
+            "deepseek-coder-v2",
+            "gemma2",
+            "gemma3",
             "phi4",
             "command-r",
             "codestral",
@@ -273,7 +330,8 @@ impl LLMProvider for OllamaProvider {
 
     async fn list_models(&self) -> Result<Vec<crate::types::FullModelInfo>> {
         let url = format!("{}/api/tags", self.get_base_url());
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .send()
             .await
@@ -303,14 +361,16 @@ impl LLMProvider for OllamaProvider {
             models: Option<Vec<OllamaModel>>,
         }
 
-        let tags: OllamaTags = response.json().await
+        let tags: OllamaTags = response
+            .json()
+            .await
             .map_err(|e| LLMError::SerializationError {
                 message: format!("Failed to parse Ollama response: {}", e),
                 context: Some("list_models".to_string()),
             })?;
 
         let models = tags.models.unwrap_or_default();
-        
+
         Ok(models
             .into_iter()
             .map(|m| crate::types::FullModelInfo {
@@ -354,10 +414,8 @@ impl LLMProvider for OllamaProvider {
             request.model.clone()
         };
 
-        let messages: Vec<serde_json::Value> = request.messages
-            .iter()
-            .map(serialize_message)
-            .collect();
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(serialize_message).collect();
 
         let mut body = json!({
             "model": model,
@@ -379,7 +437,8 @@ impl LLMProvider for OllamaProvider {
 
         let url = format!("{}/api/chat", self.get_base_url());
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -401,17 +460,18 @@ impl LLMProvider for OllamaProvider {
             });
         }
 
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| LLMError::SerializationError {
-                message: e.to_string(),
-                context: Some("Failed to parse Ollama response".to_string()),
-            })?;
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse Ollama response".to_string()),
+                })?;
 
         let message = &json["message"];
 
-        let content = message["content"]
-            .as_str()
-            .unwrap_or("");
+        let content = message["content"].as_str().unwrap_or("");
 
         let choices = vec![Choice {
             index: 0,
@@ -421,7 +481,9 @@ impl LLMProvider for OllamaProvider {
         }];
 
         // Estimate token usage (Ollama doesn't always return this)
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 
@@ -456,10 +518,8 @@ impl LLMProvider for OllamaProvider {
             request.model.clone()
         };
 
-        let messages: Vec<serde_json::Value> = request.messages
-            .iter()
-            .map(serialize_message)
-            .collect();
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(serialize_message).collect();
 
         let mut body = serde_json::json!({
             "model": model,
@@ -481,7 +541,8 @@ impl LLMProvider for OllamaProvider {
 
         let url = format!("{}/api/chat", self.get_base_url());
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -510,21 +571,21 @@ impl LLMProvider for OllamaProvider {
             let mut chunk_count = 0;
 
             let mut stream = response.bytes_stream();
-            
+
             while let Ok(Some(bytes)) = stream.try_next().await {
                 let bytes_vec = bytes.to_vec();
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
-                
+
                 loop {
                     if let Some(pos) = buffer.find("\n") {
                         let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
-                        
+
                         match serde_json::from_str::<serde_json::Value>(&line) {
                             Ok(json) => {
                                 let message = json["message"]["content"].as_str().unwrap_or("");
-                                
+
                                 if message.is_empty() {
                                     continue;
                                 }
@@ -612,10 +673,8 @@ impl LLMProvider for OllamaProvider {
             })
             .collect();
 
-        let messages: Vec<serde_json::Value> = request.messages
-            .iter()
-            .map(serialize_message)
-            .collect();
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(serialize_message).collect();
 
         let mut body = json!({
             "model": model,
@@ -638,7 +697,8 @@ impl LLMProvider for OllamaProvider {
 
         let url = format!("{}/api/chat", self.get_base_url());
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -660,18 +720,18 @@ impl LLMProvider for OllamaProvider {
             });
         }
 
-        let resp_json: serde_json::Value = response.json().await
-            .map_err(|e| LLMError::SerializationError {
-                message: e.to_string(),
-                context: Some("Failed to parse Ollama function calling response".to_string()),
-            })?;
+        let resp_json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse Ollama function calling response".to_string()),
+                })?;
 
         let message = &resp_json["message"];
 
-        let content = message["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = message["content"].as_str().unwrap_or("").to_string();
 
         let tool_calls = parse_tool_calls(&message["tool_calls"]);
 
@@ -681,7 +741,9 @@ impl LLMProvider for OllamaProvider {
             "stop"
         };
 
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 
@@ -689,7 +751,11 @@ impl LLMProvider for OllamaProvider {
 
         let assistant_msg = if let Some(calls) = tool_calls.clone() {
             ChatMessage::Assistant {
-                content: if content.is_empty() { None } else { Some(content) },
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
                 tool_calls: Some(calls),
                 name: None,
             }
@@ -739,7 +805,9 @@ impl LLMProvider for OllamaProvider {
             request.model.clone()
         };
 
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 

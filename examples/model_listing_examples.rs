@@ -5,10 +5,10 @@
 
 #[cfg(test)]
 mod examples {
-    use vincents_llm::provider::LLMProvider;
     use vincents_llm::anthropic::AnthropicProvider;
-    use vincents_llm::openai::OpenAIProvider;
     use vincents_llm::ollama::OllamaProvider;
+    use vincents_llm::openai::OpenAIProvider;
+    use vincents_llm::provider::LLMProvider;
 
     /// Example 1: List all models from Anthropic
     #[tokio::test]
@@ -18,10 +18,7 @@ mod examples {
             .expect("Failed to initialize Anthropic provider");
 
         // List all available models
-        let models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let models = provider.list_models().await.expect("Failed to list models");
 
         println!("Available Anthropic Models:");
         println!("==========================");
@@ -39,7 +36,10 @@ mod examples {
 
             println!("  Capabilities:");
             println!("    Vision: {}", model.capabilities.vision);
-            println!("    Function Calling: {}", model.capabilities.function_calling);
+            println!(
+                "    Function Calling: {}",
+                model.capabilities.function_calling
+            );
             println!("    JSON Mode: {}", model.capabilities.json_mode);
             println!("    Caching: {}", model.capabilities.caching);
             println!("    Streaming: {}", model.capabilities.streaming);
@@ -102,14 +102,13 @@ mod examples {
         println!("OpenAI Models: {}", openai_models.len());
 
         // Find most expensive input pricing
-        if let Some(expensive) = anthropic_models
-            .iter()
-            .max_by(|a, b| {
-                let a_cost = a.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
-                let b_cost = b.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
-                a_cost.partial_cmp(&b_cost).unwrap_or(std::cmp::Ordering::Equal)
-            })
-        {
+        if let Some(expensive) = anthropic_models.iter().max_by(|a, b| {
+            let a_cost = a.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
+            let b_cost = b.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
+            a_cost
+                .partial_cmp(&b_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             println!("\nMost Expensive Anthropic Model:");
             println!("  Name: {}", expensive.name);
             if let Some(pricing) = &expensive.pricing {
@@ -135,10 +134,7 @@ mod examples {
             .await
             .expect("Failed to initialize provider");
 
-        let all_models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let all_models = provider.list_models().await.expect("Failed to list models");
 
         // Filter for vision-capable models
         let vision_models: Vec<_> = all_models
@@ -172,10 +168,7 @@ mod examples {
             .await
             .expect("Failed to initialize provider");
 
-        let mut models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let mut models = provider.list_models().await.expect("Failed to list models");
 
         // Sort by context window (descending)
         models.sort_by(|a, b| b.context_window.cmp(&a.context_window));
@@ -194,10 +187,7 @@ mod examples {
             .await
             .expect("Failed to initialize provider");
 
-        let models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let models = provider.list_models().await.expect("Failed to list models");
 
         // Find cheapest input pricing
         if let Some(cheapest) = models
@@ -206,7 +196,9 @@ mod examples {
             .min_by(|a, b| {
                 let a_cost = a.pricing.as_ref().unwrap().prompt_tokens;
                 let b_cost = b.pricing.as_ref().unwrap().prompt_tokens;
-                a_cost.partial_cmp(&b_cost).unwrap_or(std::cmp::Ordering::Equal)
+                a_cost
+                    .partial_cmp(&b_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
         {
             println!("Cheapest Anthropic Model");
@@ -227,10 +219,7 @@ mod examples {
             .await
             .expect("Failed to initialize provider");
 
-        let models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let models = provider.list_models().await.expect("Failed to list models");
 
         println!("Anthropic Models Capability Matrix:");
         println!("===================================");
@@ -238,13 +227,21 @@ mod examples {
         println!("---------------------------|--------|-----------|--------");
 
         for model in models {
-            let vision = if model.capabilities.vision { "Yes" } else { "No  " };
+            let vision = if model.capabilities.vision {
+                "Yes"
+            } else {
+                "No  "
+            };
             let functions = if model.capabilities.function_calling {
                 "Yes"
             } else {
                 "No "
             };
-            let caching = if model.capabilities.caching { "Yes" } else { "No " };
+            let caching = if model.capabilities.caching {
+                "Yes"
+            } else {
+                "No "
+            };
 
             println!(
                 "{:<26} | {:<6} | {:<9} | {:<7}",
@@ -261,8 +258,8 @@ mod examples {
             default_model: Some("llama3.1:8b".to_string()),
         };
 
-        let provider = OllamaProvider::with_config(config)
-            .expect("Failed to create Ollama provider");
+        let provider =
+            OllamaProvider::with_config(config).expect("Failed to create Ollama provider");
 
         // List available local models
         match provider.list_models().await {
@@ -289,10 +286,7 @@ mod examples {
             .await
             .expect("Failed to initialize provider");
 
-        let models = provider
-            .list_models()
-            .await
-            .expect("Failed to list models");
+        let models = provider.list_models().await.expect("Failed to list models");
 
         // Estimate cost for 1000 input tokens + 500 output tokens
         let input_tokens = 1000.0;
@@ -327,11 +321,11 @@ mod examples {
         // Helper function to select best provider for use case
         fn select_provider(use_case: &str) -> &'static str {
             match use_case {
-                "vision" => "anthropic", // All Anthropic models support vision
-                "fastest" => "openai",   // GPT-3.5-turbo is fastest
-                "cheapest" => "anthropic", // Haiku is cheapest
+                "vision" => "anthropic",    // All Anthropic models support vision
+                "fastest" => "openai",      // GPT-3.5-turbo is fastest
+                "cheapest" => "anthropic",  // Haiku is cheapest
                 "most_capable" => "openai", // GPT-4 is most capable
-                "local" => "ollama",    // Local models
+                "local" => "ollama",        // Local models
                 _ => "openai",
             }
         }

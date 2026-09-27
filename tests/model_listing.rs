@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use vincents_llm::provider::LLMProvider;
     use vincents_llm::anthropic::AnthropicProvider;
-    use vincents_llm::openai::OpenAIProvider;
     use vincents_llm::ollama::OllamaProvider;
+    use vincents_llm::openai::OpenAIProvider;
+    use vincents_llm::provider::LLMProvider;
 
     #[tokio::test]
     async fn test_anthropic_list_models() {
@@ -11,13 +11,13 @@ mod tests {
             .await
             .expect("Should create Anthropic provider");
 
-        let models = provider
-            .list_models()
-            .await
-            .expect("Should list models");
+        let models = provider.list_models().await.expect("Should list models");
 
-        assert!(!models.is_empty(), "Anthropic should have at least one model");
-        
+        assert!(
+            !models.is_empty(),
+            "Anthropic should have at least one model"
+        );
+
         // Verify Claude 3.5 Sonnet
         let sonnet = models
             .iter()
@@ -42,7 +42,7 @@ mod tests {
             .expect("Should create Anthropic provider");
 
         let models = provider.list_models().await.expect("Should list models");
-        
+
         let opus = models
             .iter()
             .find(|m| m.id == "claude-3-opus-20240229")
@@ -50,7 +50,7 @@ mod tests {
 
         assert_eq!(opus.name, "Claude 3 Opus");
         assert_eq!(opus.context_window, 200000);
-        
+
         let pricing = opus.pricing.as_ref().expect("Should have pricing");
         assert_eq!(pricing.prompt_tokens, 0.015);
         assert_eq!(pricing.completion_tokens, 0.075);
@@ -63,7 +63,7 @@ mod tests {
             .expect("Should create Anthropic provider");
 
         let models = provider.list_models().await.expect("Should list models");
-        
+
         let haiku = models
             .iter()
             .find(|m| m.id == "claude-3-haiku-20240307")
@@ -71,8 +71,11 @@ mod tests {
 
         assert_eq!(haiku.name, "Claude 3 Haiku");
         assert_eq!(haiku.context_window, 200000);
-        assert!(!haiku.capabilities.caching, "Haiku should not support caching");
-        
+        assert!(
+            !haiku.capabilities.caching,
+            "Haiku should not support caching"
+        );
+
         let pricing = haiku.pricing.as_ref().expect("Should have pricing");
         assert!(pricing.prompt_tokens < 0.001);
         assert!(pricing.completion_tokens < 0.01);
@@ -84,10 +87,7 @@ mod tests {
             .await
             .expect("Should create OpenAI provider");
 
-        let models = provider
-            .list_models()
-            .await
-            .expect("Should list models");
+        let models = provider.list_models().await.expect("Should list models");
 
         assert!(!models.is_empty(), "OpenAI should have at least one model");
 
@@ -110,7 +110,7 @@ mod tests {
             .expect("Should create OpenAI provider");
 
         let models = provider.list_models().await.expect("Should list models");
-        
+
         let turbo = models
             .iter()
             .find(|m| m.id == "gpt-4-turbo")
@@ -129,7 +129,7 @@ mod tests {
             .expect("Should create OpenAI provider");
 
         let models = provider.list_models().await.expect("Should list models");
-        
+
         let gpt35 = models
             .iter()
             .find(|m| m.id == "gpt-3.5-turbo")
@@ -137,7 +137,10 @@ mod tests {
 
         assert_eq!(gpt35.name, "GPT-3.5 Turbo");
         assert_eq!(gpt35.context_window, 4096);
-        assert!(!gpt35.capabilities.vision, "GPT-3.5 should not support vision");
+        assert!(
+            !gpt35.capabilities.vision,
+            "GPT-3.5 should not support vision"
+        );
         assert!(gpt35.capabilities.function_calling);
 
         let pricing = gpt35.pricing.as_ref().expect("Should have pricing");
@@ -152,13 +155,12 @@ mod tests {
             default_model: Some("llama3.1:8b".to_string()),
         };
 
-        let provider = OllamaProvider::with_config(config)
-            .expect("Should create Ollama provider");
+        let provider = OllamaProvider::with_config(config).expect("Should create Ollama provider");
 
         // Note: This test will fail if Ollama is not running
         // In a real scenario, we would mock the HTTP response
         let models = provider.list_models().await;
-        
+
         // Just verify the function exists and returns a result
         assert!(models.is_ok() || models.is_err(), "Should return a result");
     }
@@ -175,14 +177,21 @@ mod tests {
             assert!(!model.id.is_empty(), "Model id should not be empty");
             assert!(!model.name.is_empty(), "Model name should not be empty");
             assert_eq!(model.provider, "anthropic");
-            assert!(model.context_window > 0, "Context window should be positive");
+            assert!(
+                model.context_window > 0,
+                "Context window should be positive"
+            );
             assert!(model.pricing.is_some(), "Pricing should be present");
-            
+
             if let Some(pricing) = model.pricing {
-                assert!(pricing.prompt_tokens > 0.0 || pricing.prompt_tokens == 0.0, 
-                        "Pricing should be valid");
-                assert!(pricing.completion_tokens > 0.0 || pricing.completion_tokens == 0.0, 
-                        "Pricing should be valid");
+                assert!(
+                    pricing.prompt_tokens > 0.0 || pricing.prompt_tokens == 0.0,
+                    "Pricing should be valid"
+                );
+                assert!(
+                    pricing.completion_tokens > 0.0 || pricing.completion_tokens == 0.0,
+                    "Pricing should be valid"
+                );
             }
         }
     }
@@ -198,7 +207,7 @@ mod tests {
         for model in models {
             // Capabilities should always be present
             let caps = &model.capabilities;
-            
+
             // These are boolean fields, so they should be validly initialized
             let _ = caps.vision;
             let _ = caps.function_calling;
@@ -215,19 +224,27 @@ mod tests {
             .expect("Should create provider");
 
         let mut models = provider.list_models().await.expect("Should list models");
-        
+
         // Sort by prompt token cost
         models.sort_by(|a, b| {
             let a_cost = a.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
             let b_cost = b.pricing.as_ref().map(|p| p.prompt_tokens).unwrap_or(0.0);
-            a_cost.partial_cmp(&b_cost).unwrap_or(std::cmp::Ordering::Equal)
+            a_cost
+                .partial_cmp(&b_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Haiku should be cheapest
-        assert_eq!(models.first().map(|m| m.id.as_str()), Some("claude-3-haiku-20240307"));
-        
+        assert_eq!(
+            models.first().map(|m| m.id.as_str()),
+            Some("claude-3-haiku-20240307")
+        );
+
         // Opus should be most expensive
-        assert_eq!(models.last().map(|m| m.id.as_str()), Some("claude-3-opus-20240229"));
+        assert_eq!(
+            models.last().map(|m| m.id.as_str()),
+            Some("claude-3-opus-20240229")
+        );
     }
 
     #[tokio::test]
@@ -237,13 +254,13 @@ mod tests {
             .expect("Should create provider");
 
         let mut models = provider.list_models().await.expect("Should list models");
-        
+
         // Sort by context window descending
         models.sort_by(|a, b| b.context_window.cmp(&a.context_window));
 
         // GPT-4-turbo has the largest context
         assert!(models[0].context_window >= 128000);
-        
+
         // GPT-3.5-turbo has the smallest context
         assert!(models.last().map(|m| m.context_window).unwrap_or(0) <= 4096);
     }
@@ -258,7 +275,10 @@ mod tests {
 
         // All returned models should be available
         for model in models {
-            assert!(model.available, "All returned models should be marked as available");
+            assert!(
+                model.available,
+                "All returned models should be marked as available"
+            );
         }
     }
 
@@ -274,7 +294,7 @@ mod tests {
             .expect("Should not error");
 
         assert!(model_opt.is_some(), "Should find model");
-        
+
         let model = model_opt.unwrap();
         assert_eq!(model.name, "Claude 3.5 Sonnet");
         assert_eq!(model.context_window, 200000);

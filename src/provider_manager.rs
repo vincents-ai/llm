@@ -1,11 +1,13 @@
-use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitOpenError, CircuitState};
-use crate::provider::{LLMProvider, ProviderHealth, ProviderRegistry};
+use crate::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitOpenError, CircuitState,
+};
 use crate::error::{LLMError, Result};
+use crate::provider::{LLMProvider, ProviderHealth, ProviderRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 /// Configuration for provider manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,10 +108,7 @@ impl ProviderManager {
     /// Respects circuit breaker state — providers with open breakers are
     /// skipped (unless all are open, in which case half-open providers are
     /// tried first).
-    pub async fn select_provider(
-        &self,
-        model: &str,
-    ) -> Result<Arc<dyn LLMProvider>> {
+    pub async fn select_provider(&self, model: &str) -> Result<Arc<dyn LLMProvider>> {
         let providers = self.providers.read().await;
 
         // Collect provider states upfront (need async for each)
@@ -215,7 +214,9 @@ impl ProviderManager {
             // Check circuit breaker
             match entry.circuit_breaker.allow_request().await {
                 Ok(()) => {}
-                Err(CircuitOpenError { remaining_timeout, .. }) => {
+                Err(CircuitOpenError {
+                    remaining_timeout, ..
+                }) => {
                     debug!(
                         provider = %name,
                         remaining = ?remaining_timeout,
@@ -270,20 +271,28 @@ impl ProviderManager {
         let mut status = HashMap::new();
 
         for (name, entry) in providers.iter() {
-            let mut health = entry.provider.health_check().await.unwrap_or_else(|e| ProviderHealth {
-                name: name.clone(),
-                healthy: false,
-                latency_ms: None,
-                error: Some(e.to_string()),
-                rate_limit_remaining: None,
-                rate_limit_total: None,
-            });
+            let mut health =
+                entry
+                    .provider
+                    .health_check()
+                    .await
+                    .unwrap_or_else(|e| ProviderHealth {
+                        name: name.clone(),
+                        healthy: false,
+                        latency_ms: None,
+                        error: Some(e.to_string()),
+                        rate_limit_remaining: None,
+                        rate_limit_total: None,
+                    });
 
             // Enrich with circuit breaker state
             let breaker_state = entry.circuit_breaker.state().await;
             if breaker_state == CircuitState::Open {
                 health.healthy = false;
-                health.error = Some(format!("Circuit breaker open ({})", health.error.as_deref().unwrap_or("")));
+                health.error = Some(format!(
+                    "Circuit breaker open ({})",
+                    health.error.as_deref().unwrap_or("")
+                ));
             }
 
             status.insert(name.clone(), health);
@@ -305,7 +314,10 @@ impl ProviderManager {
     }
 
     /// Get circuit breaker metrics for a specific provider.
-    pub async fn provider_circuit_breaker_metrics(&self, provider_name: &str) -> Option<CircuitBreakerMetrics> {
+    pub async fn provider_circuit_breaker_metrics(
+        &self,
+        provider_name: &str,
+    ) -> Option<CircuitBreakerMetrics> {
         let providers = self.providers.read().await;
         match providers.get(provider_name) {
             Some(entry) => Some(entry.circuit_breaker.metrics().await),
@@ -314,7 +326,11 @@ impl ProviderManager {
     }
 
     /// Force the circuit breaker state for a provider (admin/testing).
-    pub async fn force_breaker_state(&self, provider_name: &str, state: CircuitState) -> Result<()> {
+    pub async fn force_breaker_state(
+        &self,
+        provider_name: &str,
+        state: CircuitState,
+    ) -> Result<()> {
         let providers = self.providers.read().await;
         match providers.get(provider_name) {
             Some(entry) => {
@@ -382,11 +398,11 @@ fn is_breaker_failure(error: &LLMError) -> bool {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
+    use crate::error::{LLMError, Result};
     use crate::provider::LLMProvider;
     use crate::types::*;
-    use crate::error::{LLMError, Result};
-    use crate::RateLimitStatus;
     use crate::CostEstimate;
+    use crate::RateLimitStatus;
     use async_trait::async_trait;
 
     /// Minimal mock provider for testing provider manager behaviour.
@@ -408,9 +424,16 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for MockProvider {
-        fn name(&self) -> &str { &self.name }
-        fn supported_models(&self) -> Vec<String> { self.models.clone() }
-        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<String> {
+            self.models.clone()
+        }
+        async fn chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse> {
             Ok(ChatCompletionResponse {
                 id: "test".to_string(),
                 object: "chat.completion".to_string(),
@@ -457,7 +480,9 @@ mod tests {
                 provider: self.name.clone(),
             })
         }
-        fn config(&self) -> &ProviderConfig { &self.config }
+        fn config(&self) -> &ProviderConfig {
+            &self.config
+        }
     }
 
     #[tokio::test]
@@ -489,7 +514,10 @@ mod tests {
         let provider = Arc::new(MockProvider::new("test-prov", vec!["gpt-4"]));
 
         manager.register_provider(provider).await;
-        manager.force_breaker_state("test-prov", CircuitState::Open).await.unwrap();
+        manager
+            .force_breaker_state("test-prov", CircuitState::Open)
+            .await
+            .unwrap();
 
         let metrics = manager.circuit_breaker_metrics().await;
         assert_eq!(metrics["test-prov"].state, CircuitState::Open);
@@ -501,7 +529,10 @@ mod tests {
         let provider = Arc::new(MockProvider::new("test-prov", vec!["gpt-4"]));
 
         manager.register_provider(provider).await;
-        manager.force_breaker_state("test-prov", CircuitState::Open).await.unwrap();
+        manager
+            .force_breaker_state("test-prov", CircuitState::Open)
+            .await
+            .unwrap();
         manager.reset_breaker("test-prov").await.unwrap();
 
         let metrics = manager.circuit_breaker_metrics().await;
@@ -527,7 +558,9 @@ mod tests {
         manager.register_provider(provider_b).await;
 
         // Trip breaker on prov-a
-        let _ = manager.force_breaker_state("prov-a", CircuitState::Open).await;
+        let _ = manager
+            .force_breaker_state("prov-a", CircuitState::Open)
+            .await;
 
         let request = ChatCompletionRequest {
             model: "gpt-4".to_string(),
@@ -535,29 +568,31 @@ mod tests {
             ..Default::default()
         };
 
-        let result = manager.execute_with_failover(&request, |prov| {
-            // prov-b should be selected (prov-a is Open)
-            let name = prov.name().to_string();
-            async move {
-                if name == "prov-b" {
-                    Ok(ChatCompletionResponse {
-                        id: "test".to_string(),
-                        object: "chat.completion".to_string(),
-                        created: 0,
-                        model: "gpt-4".to_string(),
-                        choices: vec![],
-                        usage: None,
-                        system_fingerprint: None,
-                    })
-                } else {
-                    Err(LLMError::ProviderError {
-                        provider: name.clone(),
-                        message: "unexpected".to_string(),
-                        code: None,
-                    })
+        let result = manager
+            .execute_with_failover(&request, |prov| {
+                // prov-b should be selected (prov-a is Open)
+                let name = prov.name().to_string();
+                async move {
+                    if name == "prov-b" {
+                        Ok(ChatCompletionResponse {
+                            id: "test".to_string(),
+                            object: "chat.completion".to_string(),
+                            created: 0,
+                            model: "gpt-4".to_string(),
+                            choices: vec![],
+                            usage: None,
+                            system_fingerprint: None,
+                        })
+                    } else {
+                        Err(LLMError::ProviderError {
+                            provider: name.clone(),
+                            message: "unexpected".to_string(),
+                            code: None,
+                        })
+                    }
                 }
-            }
-        }).await;
+            })
+            .await;
 
         assert!(result.is_ok());
     }
@@ -583,25 +618,29 @@ mod tests {
         };
 
         // First failure
-        let _: Result<()> = manager.execute_with_failover(&request, |_| async {
-            Err(LLMError::HttpError {
-                message: "timeout".to_string(),
-                status_code: Some(500),
-                body: None,
+        let _: Result<()> = manager
+            .execute_with_failover(&request, |_| async {
+                Err(LLMError::HttpError {
+                    message: "timeout".to_string(),
+                    status_code: Some(500),
+                    body: None,
+                })
             })
-        }).await;
+            .await;
 
         let metrics = manager.circuit_breaker_metrics().await;
         assert_eq!(metrics["prov-a"].total_failures, 1);
 
         // Second failure trips the breaker
-        let _: Result<()> = manager.execute_with_failover(&request, |_| async {
-            Err(LLMError::HttpError {
-                message: "timeout".to_string(),
-                status_code: Some(503),
-                body: None,
+        let _: Result<()> = manager
+            .execute_with_failover(&request, |_| async {
+                Err(LLMError::HttpError {
+                    message: "timeout".to_string(),
+                    status_code: Some(503),
+                    body: None,
+                })
             })
-        }).await;
+            .await;
 
         let metrics = manager.circuit_breaker_metrics().await;
         assert_eq!(metrics["prov-a"].state, CircuitState::Open);
@@ -629,12 +668,14 @@ mod tests {
         };
 
         // Auth error — should NOT trip breaker
-        let result: Result<()> = manager.execute_with_failover(&request, |_| async {
-            Err(LLMError::AuthenticationError {
-                message: "bad key".to_string(),
-                retry_after: None,
+        let result: Result<()> = manager
+            .execute_with_failover(&request, |_| async {
+                Err(LLMError::AuthenticationError {
+                    message: "bad key".to_string(),
+                    retry_after: None,
+                })
             })
-        }).await;
+            .await;
 
         assert!(result.is_err());
         let metrics = manager.circuit_breaker_metrics().await;

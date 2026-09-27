@@ -194,7 +194,7 @@ impl CostTracker {
         if let Some(ref config) = *budget {
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let state = self.state.read().unwrap();
-            
+
             if let Some(daily) = state.usage_stats.usage_by_date.get(&today) {
                 if let Some(daily_limit) = config.daily_limit {
                     if daily.cost + estimated_cost.total_cost > daily_limit {
@@ -212,16 +212,30 @@ impl CostTracker {
     /// Track cost from a completion
     pub fn track_completion(&self, estimate: &CostEstimate) {
         let mut state = self.state.write().unwrap();
-        
-        *state.total_by_provider.entry(estimate.provider.clone()).or_insert(0.0) += estimate.total_cost;
-        *state.total_by_model.entry(estimate.model.clone()).or_insert(0.0) += estimate.total_cost;
-        
+
+        *state
+            .total_by_provider
+            .entry(estimate.provider.clone())
+            .or_insert(0.0) += estimate.total_cost;
+        *state
+            .total_by_model
+            .entry(estimate.model.clone())
+            .or_insert(0.0) += estimate.total_cost;
+
         let provider_tokens = estimate.input_tokens + estimate.output_tokens;
-        *state.tokens_by_provider.entry(estimate.provider.clone()).or_insert(0) += provider_tokens as u64;
-        *state.requests_by_provider.entry(estimate.provider.clone()).or_insert(0) += 1;
-        
-        state.recent_costs.push((Instant::now(), estimate.total_cost));
-        
+        *state
+            .tokens_by_provider
+            .entry(estimate.provider.clone())
+            .or_insert(0) += provider_tokens as u64;
+        *state
+            .requests_by_provider
+            .entry(estimate.provider.clone())
+            .or_insert(0) += 1;
+
+        state
+            .recent_costs
+            .push((Instant::now(), estimate.total_cost));
+
         self.record_daily_usage_locked(&mut state, estimate);
     }
 
@@ -229,20 +243,29 @@ impl CostTracker {
     pub fn track_usage(&self, usage: &Usage, pricing: &ModelPricing, model: &str, provider: &str) {
         let estimate = CostEstimate::from_usage(usage, pricing, model, provider);
         self.track_completion(&estimate);
-        
+
         let mut state = self.state.write().unwrap();
-        *state.usage_stats.tokens_by_model.entry(model.to_string()).or_insert(0) += usage.total_tokens as u64;
+        *state
+            .usage_stats
+            .tokens_by_model
+            .entry(model.to_string())
+            .or_insert(0) += usage.total_tokens as u64;
     }
 
     /// Record daily usage for budget tracking (requires lock)
     fn record_daily_usage_locked(&self, state: &mut CostTrackerState, estimate: &CostEstimate) {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        
+
         state.usage_stats.total_cost += estimate.total_cost;
-        state.usage_stats.total_tokens += estimate.input_tokens as u64 + estimate.output_tokens as u64;
-        
-        *state.usage_stats.cost_by_model.entry(estimate.model.clone()).or_insert(0.0) += estimate.total_cost;
-        
+        state.usage_stats.total_tokens +=
+            estimate.input_tokens as u64 + estimate.output_tokens as u64;
+
+        *state
+            .usage_stats
+            .cost_by_model
+            .entry(estimate.model.clone())
+            .or_insert(0.0) += estimate.total_cost;
+
         let daily = state.usage_stats.usage_by_date.entry(today).or_default();
         daily.cost += estimate.total_cost;
         daily.requests += 1;
@@ -288,7 +311,12 @@ impl CostTracker {
 
     /// Get total requests
     pub fn total_requests(&self) -> u64 {
-        self.state.read().unwrap().requests_by_provider.values().sum()
+        self.state
+            .read()
+            .unwrap()
+            .requests_by_provider
+            .values()
+            .sum()
     }
 
     /// Get complete usage statistics
@@ -297,7 +325,11 @@ impl CostTracker {
     }
 
     /// Get usage for a specific date range
-    pub fn get_usage_in_range(&self, start_date: &str, end_date: &str) -> HashMap<String, DailyUsage> {
+    pub fn get_usage_in_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> HashMap<String, DailyUsage> {
         let state = self.state.read().unwrap();
         state
             .usage_stats
@@ -391,7 +423,7 @@ mod tests {
     fn test_cost_estimation() {
         let tracker = CostTracker::default();
         let estimate = tracker.estimate_cost("gpt-4", &test_pricing(), 1000, 500);
-        
+
         assert!((estimate.input_cost - 0.03).abs() < 0.001);
         assert!((estimate.output_cost - 0.03).abs() < 0.001);
         assert!((estimate.total_cost - 0.06).abs() < 0.001);
@@ -401,12 +433,12 @@ mod tests {
     fn test_usage_tracking() {
         let tracker = CostTracker::default();
         let usage = Usage::new(100, 50);
-        
+
         tracker.track_usage(&usage, &test_pricing(), "gpt-4", "openai");
-        
+
         assert_eq!(tracker.total_tokens(), 150);
         assert!(tracker.total_cost() > 0.0);
-        
+
         let stats = tracker.get_usage_stats();
         assert_eq!(stats.total_tokens, 150);
     }
@@ -418,9 +450,9 @@ mod tests {
             monthly_limit: None,
             currency: "USD".to_string(),
         };
-        
+
         let tracker = CostTracker::with_budget(budget);
-        
+
         let estimate = CostEstimate {
             input_cost: 0.5,
             output_cost: 0.3,
@@ -430,10 +462,10 @@ mod tests {
             model: "gpt-4".to_string(),
             provider: "openai".to_string(),
         };
-        
+
         assert!(tracker.check_budget(&estimate).is_ok());
         tracker.track_completion(&estimate);
-        
+
         let new_estimate = CostEstimate {
             total_cost: 0.3,
             ..estimate.clone()
@@ -444,7 +476,7 @@ mod tests {
     #[test]
     fn test_daily_usage_tracking() {
         let tracker = CostTracker::default();
-        
+
         let estimate = CostEstimate {
             input_cost: 0.1,
             output_cost: 0.2,
@@ -454,9 +486,9 @@ mod tests {
             model: "gpt-4".to_string(),
             provider: "openai".to_string(),
         };
-        
+
         tracker.track_completion(&estimate);
-        
+
         let stats = tracker.get_usage_stats();
         let today = Utc::now().format("%Y-%m-%d").to_string();
         assert!(stats.usage_by_date.contains_key(&today));

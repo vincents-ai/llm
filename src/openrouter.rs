@@ -6,15 +6,15 @@
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use serde_json::json;
+use std::pin::Pin;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
+use crate::error::{LLMError, Result};
 use crate::provider::LLMProvider;
-use crate::RateLimitStatus;
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 /// OpenRouter Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ impl OpenRouterProvider {
     /// Create a new OpenRouter provider
     pub async fn new(api_key: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         Ok(Self {
             config: OpenRouterConfig {
                 api_key: api_key.into(),
@@ -123,7 +123,8 @@ impl LLMProvider for OpenRouterProvider {
     /// Fetch all models from OpenRouter's live `/api/v1/models` endpoint.
     /// No authentication required.
     async fn list_models(&self) -> Result<Vec<FullModelInfo>> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(&format!("{}/models", self.get_base_url()))
             .header("Content-Type", "application/json")
             .send()
@@ -138,114 +139,149 @@ impl LLMProvider for OpenRouterProvider {
             let status = resp.status();
             let body = resp.text().await.ok();
             return Err(LLMError::HttpError {
-                message: format!("OpenRouter /models returned {}: {}", status, body.clone().unwrap_or_default()),
+                message: format!(
+                    "OpenRouter /models returned {}: {}",
+                    status,
+                    body.clone().unwrap_or_default()
+                ),
                 status_code: Some(status.as_u16()),
                 body,
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse OpenRouter models response".to_string()),
-        })?;
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse OpenRouter models response".to_string()),
+                })?;
 
-        let data = json["data"].as_array().ok_or_else(|| LLMError::SerializationError {
-            message: "Missing 'data' array in models response".to_string(),
-            context: None,
-        })?;
+        let data = json["data"]
+            .as_array()
+            .ok_or_else(|| LLMError::SerializationError {
+                message: "Missing 'data' array in models response".to_string(),
+                context: None,
+            })?;
 
-        let models: Vec<FullModelInfo> = data.iter().map(|m| {
-            let id = m["id"].as_str().unwrap_or("").to_string();
-            let name = m["name"].as_str().unwrap_or(&id).to_string();
-            let description = m["description"].as_str().map(String::from);
-            let context_length = m["context_length"].as_u64().unwrap_or(0) as u32;
-            let created = m["created"].as_u64().unwrap_or(0);
+        let models: Vec<FullModelInfo> = data
+            .iter()
+            .map(|m| {
+                let id = m["id"].as_str().unwrap_or("").to_string();
+                let name = m["name"].as_str().unwrap_or(&id).to_string();
+                let description = m["description"].as_str().map(String::from);
+                let context_length = m["context_length"].as_u64().unwrap_or(0) as u32;
+                let created = m["created"].as_u64().unwrap_or(0);
 
-            // Parse architecture / modalities
-            let arch = &m["architecture"];
-            let input_modalities: Vec<String> = arch["input_modalities"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let output_modalities: Vec<String> = arch["output_modalities"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let has_vision = input_modalities.iter().any(|m| m == "image");
+                // Parse architecture / modalities
+                let arch = &m["architecture"];
+                let input_modalities: Vec<String> = arch["input_modalities"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let output_modalities: Vec<String> = arch["output_modalities"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let has_vision = input_modalities.iter().any(|m| m == "image");
 
-            // Parse supported parameters → capabilities
-            let params: Vec<String> = m["supported_parameters"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let has_tools = params.iter().any(|p| p == "tools" || p == "tool_choice");
-            let has_json = params.iter().any(|p| p == "response_format" || p == "structured_outputs");
+                // Parse supported parameters → capabilities
+                let params: Vec<String> = m["supported_parameters"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let has_tools = params.iter().any(|p| p == "tools" || p == "tool_choice");
+                let has_json = params
+                    .iter()
+                    .any(|p| p == "response_format" || p == "structured_outputs");
 
-            // Parse pricing
-            let pricing_obj = &m["pricing"];
-            let prompt_price: f64 = pricing_obj["prompt"].as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| pricing_obj["prompt"].as_f64())
-                .unwrap_or(0.0);
-            let completion_price: f64 = pricing_obj["completion"].as_str()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| pricing_obj["completion"].as_f64())
-                .unwrap_or(0.0);
-            // OpenRouter pricing is per-token, convert to per-1K tokens
-            let prompt_per_1k = prompt_price * 1000.0;
-            let completion_per_1k = completion_price * 1000.0;
-            let is_free = prompt_price == 0.0 && completion_price == 0.0;
+                // Parse pricing
+                let pricing_obj = &m["pricing"];
+                let prompt_price: f64 = pricing_obj["prompt"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| pricing_obj["prompt"].as_f64())
+                    .unwrap_or(0.0);
+                let completion_price: f64 = pricing_obj["completion"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| pricing_obj["completion"].as_f64())
+                    .unwrap_or(0.0);
+                // OpenRouter pricing is per-token, convert to per-1K tokens
+                let prompt_per_1k = prompt_price * 1000.0;
+                let completion_per_1k = completion_price * 1000.0;
+                let is_free = prompt_price == 0.0 && completion_price == 0.0;
 
-            // Max completion tokens
-            let max_output = m["top_provider"]["max_completion_tokens"]
-                .as_u64()
-                .unwrap_or(context_length as u64) as u32;
+                // Max completion tokens
+                let max_output = m["top_provider"]["max_completion_tokens"]
+                    .as_u64()
+                    .unwrap_or(context_length as u64) as u32;
 
-            // Derive strengths from model id/name heuristics
-            let id_lower = id.to_lowercase();
-            let mut strengths = Vec::new();
-            if id_lower.contains("coder") || id_lower.contains("code") || id_lower.contains("deepseek") {
-                strengths.push("coding".to_string());
-            }
-            if id_lower.contains("reason") || id_lower.contains("o1") || id_lower.contains("o3") || id_lower.contains("think") {
-                strengths.push("reasoning".to_string());
-            }
-            if id_lower.contains("math") {
-                strengths.push("math".to_string());
-            }
-            if id_lower.contains("vision") || has_vision {
-                strengths.push("vision".to_string());
-            }
+                // Derive strengths from model id/name heuristics
+                let id_lower = id.to_lowercase();
+                let mut strengths = Vec::new();
+                if id_lower.contains("coder")
+                    || id_lower.contains("code")
+                    || id_lower.contains("deepseek")
+                {
+                    strengths.push("coding".to_string());
+                }
+                if id_lower.contains("reason")
+                    || id_lower.contains("o1")
+                    || id_lower.contains("o3")
+                    || id_lower.contains("think")
+                {
+                    strengths.push("reasoning".to_string());
+                }
+                if id_lower.contains("math") {
+                    strengths.push("math".to_string());
+                }
+                if id_lower.contains("vision") || has_vision {
+                    strengths.push("vision".to_string());
+                }
 
-            FullModelInfo {
-                id,
-                name,
-                provider: "openrouter".to_string(),
-                description,
-                context_window: context_length,
-                max_output_tokens: max_output,
-                capabilities: ModelCapabilities {
-                    function_calling: has_tools,
-                    vision: has_vision,
-                    streaming: true, // OpenRouter supports streaming for all models
-                    json_mode: has_json,
-                    caching: false,
-                    max_tokens: max_output,
+                FullModelInfo {
+                    id,
+                    name,
+                    provider: "openrouter".to_string(),
+                    description,
                     context_window: context_length,
-                    input_modalities,
-                    output_modalities,
-                    strengths,
-                },
-                pricing: Some(ModelPricing {
-                    prompt_tokens: prompt_per_1k,
-                    completion_tokens: completion_per_1k,
-                    image_tokens: None,
-                    is_free,
-                }),
-                created,
-                available: true,
-            }
-        }).collect();
+                    max_output_tokens: max_output,
+                    capabilities: ModelCapabilities {
+                        function_calling: has_tools,
+                        vision: has_vision,
+                        streaming: true, // OpenRouter supports streaming for all models
+                        json_mode: has_json,
+                        caching: false,
+                        max_tokens: max_output,
+                        context_window: context_length,
+                        input_modalities,
+                        output_modalities,
+                        strengths,
+                    },
+                    pricing: Some(ModelPricing {
+                        prompt_tokens: prompt_per_1k,
+                        completion_tokens: completion_per_1k,
+                        image_tokens: None,
+                        is_free,
+                    }),
+                    created,
+                    available: true,
+                }
+            })
+            .collect();
 
         Ok(models)
     }
@@ -261,7 +297,8 @@ impl LLMProvider for OpenRouterProvider {
         };
 
         // Convert messages to OpenRouter format
-        let messages: Vec<serde_json::Value> = request.messages
+        let messages: Vec<serde_json::Value> = request
+            .messages
             .iter()
             .map(|msg| {
                 let role = match msg.role() {
@@ -270,11 +307,9 @@ impl LLMProvider for OpenRouterProvider {
                     MessageRole::Assistant => "assistant",
                     MessageRole::Function | MessageRole::Tool => "user",
                 };
-                
-                let content = msg.content()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                
+
+                let content = msg.content().map(|s| s.to_string()).unwrap_or_default();
+
                 json!({
                     "role": role,
                     "content": content
@@ -314,7 +349,8 @@ impl LLMProvider for OpenRouterProvider {
             }
         }
 
-        let mut request_builder = self.client
+        let mut request_builder = self
+            .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
 
@@ -322,7 +358,8 @@ impl LLMProvider for OpenRouterProvider {
         if let Some(jwt) = &self.config.jwt_token {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
         } else {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
         // Add referrer for credit tracking
@@ -335,15 +372,16 @@ impl LLMProvider for OpenRouterProvider {
             request_builder = request_builder.header("OpenRouter-Router", route);
         }
 
-        let response = request_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LLMError::HttpError {
-                message: e.to_string(),
-                status_code: None,
-                body: None,
-            })?;
+        let response =
+            request_builder
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| LLMError::HttpError {
+                    message: e.to_string(),
+                    status_code: None,
+                    body: None,
+                })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -355,11 +393,14 @@ impl LLMProvider for OpenRouterProvider {
             });
         }
 
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| LLMError::SerializationError {
-                message: e.to_string(),
-                context: Some("Failed to parse OpenRouter response".to_string()),
-            })?;
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse OpenRouter response".to_string()),
+                })?;
 
         let id = json["id"].as_str().unwrap_or("unknown").to_string();
         let created = json["created"].as_u64().unwrap_or(0);
@@ -406,7 +447,10 @@ impl LLMProvider for OpenRouterProvider {
             model,
             choices,
             usage,
-            system_fingerprint: json.get("system_fingerprint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            system_fingerprint: json
+                .get("system_fingerprint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         })
     }
 
@@ -420,7 +464,8 @@ impl LLMProvider for OpenRouterProvider {
             request.model.clone()
         };
 
-        let messages: Vec<serde_json::Value> = request.messages
+        let messages: Vec<serde_json::Value> = request
+            .messages
             .iter()
             .map(|msg| {
                 let role = match msg.role() {
@@ -429,11 +474,9 @@ impl LLMProvider for OpenRouterProvider {
                     MessageRole::Assistant => "assistant",
                     MessageRole::Function | MessageRole::Tool => "user",
                 };
-                
-                let content = msg.content()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                
+
+                let content = msg.content().map(|s| s.to_string()).unwrap_or_default();
+
                 serde_json::json!({
                     "role": role,
                     "content": content
@@ -459,14 +502,16 @@ impl LLMProvider for OpenRouterProvider {
             }
         }
 
-        let mut request_builder = self.client
+        let mut request_builder = self
+            .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
 
         if let Some(jwt) = &self.config.jwt_token {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
         } else {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
         if let Some(referrer) = &self.config.referrer {
@@ -477,15 +522,16 @@ impl LLMProvider for OpenRouterProvider {
             request_builder = request_builder.header("OpenRouter-Router", route);
         }
 
-        let response = request_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LLMError::HttpError {
-                message: e.to_string(),
-                status_code: None,
-                body: None,
-            })?;
+        let response =
+            request_builder
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| LLMError::HttpError {
+                    message: e.to_string(),
+                    status_code: None,
+                    body: None,
+                })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -504,17 +550,17 @@ impl LLMProvider for OpenRouterProvider {
             let mut chunk_count = 0;
 
             let mut stream = response.bytes_stream();
-            
+
             while let Ok(Some(bytes)) = stream.try_next().await {
                 let bytes_vec = bytes.to_vec();
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
-                
+
                 loop {
                     if let Some(pos) = buffer.find("\n") {
                         let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
-                        
+
                         if line.starts_with("data: ") {
                             let data = &line[6..];
                             if data == "[DONE]" {
@@ -526,7 +572,7 @@ impl LLMProvider for OpenRouterProvider {
                                     if delta.is_null() || !delta.is_string() {
                                         continue;
                                     }
-                                    
+
                                     let content = delta.as_str().unwrap_or("");
                                     if content.is_empty() {
                                         continue;
@@ -588,47 +634,62 @@ impl LLMProvider for OpenRouterProvider {
             request.model.clone()
         };
 
-        let tools: Vec<serde_json::Value> = functions.iter().map(|f| {
-            let mut func_obj = json!({
-                "name": f.name,
-            });
-            if let Some(desc) = &f.description {
-                func_obj["description"] = json!(desc);
-            }
-            if let Some(params) = &f.parameters {
-                func_obj["parameters"] = params.clone();
-            }
-            json!({
-                "type": "function",
-                "function": func_obj
-            })
-        }).collect();
-
-        let messages: Vec<serde_json::Value> = request.messages
+        let tools: Vec<serde_json::Value> = functions
             .iter()
-            .map(|msg| {
-                match msg {
-                    ChatMessage::System { content, name } => {
-                        let mut obj = json!({"role": "system", "content": content});
-                        if let Some(n) = name { obj["name"] = json!(n); }
-                        obj
+            .map(|f| {
+                let mut func_obj = json!({
+                    "name": f.name,
+                });
+                if let Some(desc) = &f.description {
+                    func_obj["description"] = json!(desc);
+                }
+                if let Some(params) = &f.parameters {
+                    func_obj["parameters"] = params.clone();
+                }
+                json!({
+                    "type": "function",
+                    "function": func_obj
+                })
+            })
+            .collect();
+
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|msg| match msg {
+                ChatMessage::System { content, name } => {
+                    let mut obj = json!({"role": "system", "content": content});
+                    if let Some(n) = name {
+                        obj["name"] = json!(n);
                     }
-                    ChatMessage::User { content, name } => {
-                        let mut obj = json!({"role": "user", "content": content});
-                        if let Some(n) = name { obj["name"] = json!(n); }
-                        obj
+                    obj
+                }
+                ChatMessage::User { content, name } => {
+                    let mut obj = json!({"role": "user", "content": content});
+                    if let Some(n) = name {
+                        obj["name"] = json!(n);
                     }
-                    ChatMessage::Assistant { content, tool_calls, name } => {
-                        let mut obj = json!({"role": "assistant"});
-                        if let Some(c) = content {
-                            obj["content"] = json!(c);
-                        } else {
-                            obj["content"] = serde_json::Value::Null;
-                        }
-                        if let Some(n) = name { obj["name"] = json!(n); }
-                        if let Some(tcs) = tool_calls {
-                            if !tcs.is_empty() {
-                                let or_tcs: Vec<serde_json::Value> = tcs.iter().filter_map(|tc| {
+                    obj
+                }
+                ChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                    name,
+                } => {
+                    let mut obj = json!({"role": "assistant"});
+                    if let Some(c) = content {
+                        obj["content"] = json!(c);
+                    } else {
+                        obj["content"] = serde_json::Value::Null;
+                    }
+                    if let Some(n) = name {
+                        obj["name"] = json!(n);
+                    }
+                    if let Some(tcs) = tool_calls {
+                        if !tcs.is_empty() {
+                            let or_tcs: Vec<serde_json::Value> = tcs
+                                .iter()
+                                .filter_map(|tc| {
                                     if let ToolCall::Function(FunctionCall::Custom(c)) = tc {
                                         Some(json!({
                                             "id": c.id.as_deref().unwrap_or(""),
@@ -638,23 +699,30 @@ impl LLMProvider for OpenRouterProvider {
                                                 "arguments": c.arguments,
                                             }
                                         }))
-                                    } else { None }
-                                }).collect();
-                                if !or_tcs.is_empty() { obj["tool_calls"] = json!(or_tcs); }
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if !or_tcs.is_empty() {
+                                obj["tool_calls"] = json!(or_tcs);
                             }
                         }
-                        obj
                     }
-                    ChatMessage::Tool { tool_call_id, content } => {
-                        json!({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": content,
-                        })
-                    }
-                    ChatMessage::Function { name, arguments } => {
-                        json!({"role": "function", "name": name, "content": arguments})
-                    }
+                    obj
+                }
+                ChatMessage::Tool {
+                    tool_call_id,
+                    content,
+                } => {
+                    json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": content,
+                    })
+                }
+                ChatMessage::Function { name, arguments } => {
+                    json!({"role": "function", "name": name, "content": arguments})
                 }
             })
             .collect();
@@ -680,14 +748,16 @@ impl LLMProvider for OpenRouterProvider {
             }
         }
 
-        let mut request_builder = self.client
+        let mut request_builder = self
+            .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
 
         if let Some(jwt) = &self.config.jwt_token {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
         } else {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
         if let Some(referrer) = &self.config.referrer {
@@ -698,15 +768,16 @@ impl LLMProvider for OpenRouterProvider {
             request_builder = request_builder.header("OpenRouter-Router", route);
         }
 
-        let response = request_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LLMError::HttpError {
-                message: e.to_string(),
-                status_code: None,
-                body: None,
-            })?;
+        let response =
+            request_builder
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| LLMError::HttpError {
+                    message: e.to_string(),
+                    status_code: None,
+                    body: None,
+                })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -718,11 +789,14 @@ impl LLMProvider for OpenRouterProvider {
             });
         }
 
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| LLMError::SerializationError {
-                message: e.to_string(),
-                context: Some("Failed to parse OpenRouter response".to_string()),
-            })?;
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse OpenRouter response".to_string()),
+                })?;
 
         let id = json["id"].as_str().unwrap_or("unknown").to_string();
         let created = json["created"].as_u64().unwrap_or(0);
@@ -735,23 +809,41 @@ impl LLMProvider for OpenRouterProvider {
             .enumerate()
             .map(|(idx, choice)| {
                 let msg = &choice["message"];
-                let content = msg.get("content")
+                let content = msg
+                    .get("content")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let tool_calls = msg.get("tool_calls")
+                let tool_calls = msg
+                    .get("tool_calls")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
-                        arr.iter().filter_map(|tc| {
-                            let tc_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let func = tc.get("function")?;
-                            let tc_name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let tc_args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
-                            Some(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
-                                id: if tc_id.is_empty() { None } else { Some(tc_id) },
-                                name: tc_name,
-                                arguments: tc_args,
-                            })))
-                        }).collect::<Vec<_>>()
+                        arr.iter()
+                            .filter_map(|tc| {
+                                let tc_id = tc
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let func = tc.get("function")?;
+                                let tc_name = func
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let tc_args = func
+                                    .get("arguments")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("{}")
+                                    .to_string();
+                                Some(ToolCall::Function(FunctionCall::Custom(
+                                    CustomFunctionCall {
+                                        id: if tc_id.is_empty() { None } else { Some(tc_id) },
+                                        name: tc_name,
+                                        arguments: tc_args,
+                                    },
+                                )))
+                            })
+                            .collect::<Vec<_>>()
                     })
                     .filter(|v| !v.is_empty());
 
@@ -781,7 +873,10 @@ impl LLMProvider for OpenRouterProvider {
             model: resp_model,
             choices,
             usage,
-            system_fingerprint: json.get("system_fingerprint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            system_fingerprint: json
+                .get("system_fingerprint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         })
     }
 
@@ -832,14 +927,17 @@ impl LLMProvider for OpenRouterProvider {
             _ => 30.0,
         };
 
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 
         let estimated_completion_tokens = request.max_tokens.unwrap_or(1000);
 
         let input_cost = estimated_prompt_tokens as f64 * input_cost_per_million / 1_000_000.0;
-        let output_cost = estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
+        let output_cost =
+            estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
 
         Ok(CostEstimate {
             input_cost,

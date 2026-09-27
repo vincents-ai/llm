@@ -1,5 +1,5 @@
-use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -84,13 +84,17 @@ impl TokenCounter {
         Ok(count)
     }
 
-    pub fn count_messages(&mut self, messages: &[crate::types::ChatMessage], model: &str) -> Result<u32, TokenCountingError> {
+    pub fn count_messages(
+        &mut self,
+        messages: &[crate::types::ChatMessage],
+        model: &str,
+    ) -> Result<u32, TokenCountingError> {
         let mut total = 0;
 
         for message in messages {
             let content = message.content().unwrap_or("");
             total += self.count_tokens(content, model)?;
-            
+
             let role_str = match message.role() {
                 crate::types::MessageRole::System => "system",
                 crate::types::MessageRole::User => "user",
@@ -170,10 +174,10 @@ mod tests {
     fn test_token_counter_cache() {
         let mut counter = TokenCounter::new(None);
         let text = "Test text for caching";
-        
+
         let first = counter.count_tokens(text, "gpt-4").unwrap();
         let second = counter.count_tokens(text, "gpt-4").unwrap();
-        
+
         assert_eq!(first, second);
         assert_eq!(counter.cache_size(), 1);
     }

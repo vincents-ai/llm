@@ -81,13 +81,24 @@ pub struct CircuitBreakerOverrides {
 impl CircuitBreakerOverrides {
     /// Merge these overrides into a base config, producing a final
     /// `CircuitBreakerConfig`.
-    pub fn merge_into(&self, base: &crate::circuit_breaker::CircuitBreakerConfig) -> crate::circuit_breaker::CircuitBreakerConfig {
+    pub fn merge_into(
+        &self,
+        base: &crate::circuit_breaker::CircuitBreakerConfig,
+    ) -> crate::circuit_breaker::CircuitBreakerConfig {
         crate::circuit_breaker::CircuitBreakerConfig {
             failure_threshold: self.failure_threshold.unwrap_or(base.failure_threshold),
             success_threshold: self.success_threshold.unwrap_or(base.success_threshold),
-            timeout: self.timeout_secs.map(Duration::from_secs).unwrap_or(base.timeout),
-            window: self.window_secs.map(Duration::from_secs).unwrap_or(base.window),
-            half_open_max_probes: self.half_open_max_probes.unwrap_or(base.half_open_max_probes),
+            timeout: self
+                .timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(base.timeout),
+            window: self
+                .window_secs
+                .map(Duration::from_secs)
+                .unwrap_or(base.window),
+            half_open_max_probes: self
+                .half_open_max_probes
+                .unwrap_or(base.half_open_max_probes),
         }
     }
 }

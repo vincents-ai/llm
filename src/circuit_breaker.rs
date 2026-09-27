@@ -341,8 +341,7 @@ impl CircuitBreaker {
                 );
             }
             CircuitState::HalfOpen => {
-                inner.half_open_active_probes =
-                    inner.half_open_active_probes.saturating_sub(1);
+                inner.half_open_active_probes = inner.half_open_active_probes.saturating_sub(1);
                 inner.half_open_successes += 1;
 
                 if inner.half_open_successes >= self.config.success_threshold {
@@ -425,8 +424,7 @@ impl CircuitBreaker {
             }
 
             CircuitState::HalfOpen => {
-                inner.half_open_active_probes =
-                    inner.half_open_active_probes.saturating_sub(1);
+                inner.half_open_active_probes = inner.half_open_active_probes.saturating_sub(1);
                 // Any failure in HalfOpen re-opens the breaker
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(now);
@@ -608,10 +606,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_closed_state_allows_requests() {
-        let breaker = CircuitBreaker::new(
-            "test-provider".to_string(),
-            CircuitBreakerConfig::default(),
-        );
+        let breaker =
+            CircuitBreaker::new("test-provider".to_string(), CircuitBreakerConfig::default());
 
         assert_eq!(breaker.state().await, CircuitState::Closed);
         assert!(breaker.allow_request().await.is_ok());
@@ -788,11 +784,20 @@ mod tests {
         for i in 0..2 {
             let _ = breaker.allow_request().await;
             breaker.record_success().await;
-            assert_eq!(breaker.state().await, CircuitState::HalfOpen, "still half-open after success {}", i + 1);
+            assert_eq!(
+                breaker.state().await,
+                CircuitState::HalfOpen,
+                "still half-open after success {}",
+                i + 1
+            );
         }
 
         let _ = breaker.allow_request().await;
         breaker.record_success().await;
-        assert_eq!(breaker.state().await, CircuitState::Closed, "closed after 3 successes");
+        assert_eq!(
+            breaker.state().await,
+            CircuitState::Closed,
+            "closed after 3 successes"
+        );
     }
 }

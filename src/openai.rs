@@ -4,17 +4,17 @@
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use reqwest;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::pin::Pin;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
+use crate::error::{LLMError, Result};
 use crate::provider::LLMProvider;
-use crate::RateLimitStatus;
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 /// OpenAI Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +47,7 @@ impl OpenAIProvider {
     /// Create a new OpenAI provider
     pub async fn new(api_key: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         Ok(Self {
             config: OpenAIConfig {
                 api_key: api_key.into(),
@@ -60,19 +60,22 @@ impl OpenAIProvider {
     /// Create with custom configuration
     pub fn with_config(config: OpenAIConfig) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         if config.api_key.is_empty() {
             return Err(LLMError::ConfigurationError {
                 message: "OpenAI API key is required".to_string(),
                 field: Some("api_key".to_string()),
             });
         }
-        
+
         Ok(Self { config, client })
     }
 
     fn get_base_url(&self) -> &str {
-        self.config.base_url.as_deref().unwrap_or("https://api.openai.com/v1")
+        self.config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
     }
 
     fn serialize_message(msg: &ChatMessage) -> Value {
@@ -97,7 +100,11 @@ impl OpenAIProvider {
                 }
                 obj
             }
-            ChatMessage::Assistant { content, tool_calls, name } => {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+                name,
+            } => {
                 let mut obj = json!({
                     "role": "assistant",
                 });
@@ -107,20 +114,23 @@ impl OpenAIProvider {
                     obj["content"] = Value::Null;
                 }
                 if let Some(tool_calls) = tool_calls {
-                    let serialized: Vec<Value> = tool_calls.iter().filter_map(|tc| {
-                        if let ToolCall::Function(FunctionCall::Custom(custom)) = tc {
-                            Some(json!({
-                                "id": custom.id.as_deref().unwrap_or(""),
-                                "type": "function",
-                                "function": {
-                                    "name": custom.name,
-                                    "arguments": custom.arguments,
-                                }
-                            }))
-                        } else {
-                            None
-                        }
-                    }).collect();
+                    let serialized: Vec<Value> = tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            if let ToolCall::Function(FunctionCall::Custom(custom)) = tc {
+                                Some(json!({
+                                    "id": custom.id.as_deref().unwrap_or(""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": custom.name,
+                                        "arguments": custom.arguments,
+                                    }
+                                }))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     if !serialized.is_empty() {
                         obj["tool_calls"] = json!(serialized);
                     }
@@ -130,7 +140,10 @@ impl OpenAIProvider {
                 }
                 obj
             }
-            ChatMessage::Tool { tool_call_id, content } => {
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => {
                 json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -148,27 +161,34 @@ impl OpenAIProvider {
     }
 
     fn parse_assistant_message(msg: &Value) -> ChatMessage {
-        let content = msg.get("content")
+        let content = msg
+            .get("content")
             .and_then(|c| c.as_str())
             .map(|s| s.to_string());
 
-        let tool_calls = msg.get("tool_calls")
+        let tool_calls = msg
+            .get("tool_calls")
             .and_then(|tc| tc.as_array())
             .map(|arr| {
-                arr.iter().filter_map(|tc| {
-                    let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let func = tc.get("function")?;
-                    let name = func.get("name")?.as_str()?.to_string();
-                    let arguments = func.get("arguments")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("{}")
-                        .to_string();
-                    Some(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
-                        id,
-                        name,
-                        arguments,
-                    })))
-                }).collect::<Vec<_>>()
+                arr.iter()
+                    .filter_map(|tc| {
+                        let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let func = tc.get("function")?;
+                        let name = func.get("name")?.as_str()?.to_string();
+                        let arguments = func
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("{}")
+                            .to_string();
+                        Some(ToolCall::Function(FunctionCall::Custom(
+                            CustomFunctionCall {
+                                id,
+                                name,
+                                arguments,
+                            },
+                        )))
+                    })
+                    .collect::<Vec<_>>()
             });
 
         let tool_calls = tool_calls.filter(|t| !t.is_empty());
@@ -181,7 +201,8 @@ impl OpenAIProvider {
     }
 
     async fn send_chat_request(&self, body: Value) -> Result<Value> {
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -204,10 +225,13 @@ impl OpenAIProvider {
             });
         }
 
-        response.json().await.map_err(|e| LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse OpenAI response".to_string()),
-        })
+        response
+            .json()
+            .await
+            .map_err(|e| LLMError::SerializationError {
+                message: e.to_string(),
+                context: Some("Failed to parse OpenAI response".to_string()),
+            })
     }
 
     fn build_response(json: Value, request_model: &str) -> ChatCompletionResponse {
@@ -246,13 +270,17 @@ impl OpenAIProvider {
             model: model.clone(),
             choices,
             usage,
-            system_fingerprint: json.get("system_fingerprint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            system_fingerprint: json
+                .get("system_fingerprint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }
     }
 
     /// Fetch models from the live OpenAI API.
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .get(&format!("{}/models", self.get_base_url()))
             .header("Content-Type", "application/json");
 
@@ -263,11 +291,14 @@ impl OpenAIProvider {
             req = req.header("OpenAI-Organization", org);
         }
 
-        let resp = req.send().await.map_err(|e| crate::error::LLMError::HttpError {
-            message: format!("Failed to fetch OpenAI models: {}", e),
-            status_code: None,
-            body: None,
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::error::LLMError::HttpError {
+                message: format!("Failed to fetch OpenAI models: {}", e),
+                status_code: None,
+                body: None,
+            })?;
 
         if !resp.status().is_success() {
             return Err(crate::error::LLMError::HttpError {
@@ -277,15 +308,20 @@ impl OpenAIProvider {
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| crate::error::LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse models response".to_string()),
-        })?;
-        let data = json["data"].as_array()
-            .ok_or_else(|| crate::error::LLMError::SerializationError {
-                message: "Missing 'data' array".to_string(),
-                context: None,
-            })?;
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| crate::error::LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse models response".to_string()),
+                })?;
+        let data =
+            json["data"]
+                .as_array()
+                .ok_or_else(|| crate::error::LLMError::SerializationError {
+                    message: "Missing 'data' array".to_string(),
+                    context: None,
+                })?;
 
         let mut models = self.known_models_lookup();
         let known_ids: Vec<_> = models.iter().map(|m| m.id.clone()).collect();
@@ -295,27 +331,56 @@ impl OpenAIProvider {
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            if known_ids.contains(&id) { continue; }
+            if known_ids.contains(&id) {
+                continue;
+            }
 
-            let id_lower = id.to_lowercase();            let has_vision = id_lower.contains("vision") || id_lower.contains("gpt-4o");
-            let has_tools = id_lower.contains("gpt-4") || id_lower.contains("gpt-3.5") || id_lower.contains("o1") || id_lower.contains("o3");
-            let ctx: u32 = if id_lower.contains("128k") || id_lower.contains("gpt-4o") { 128000 } else { 16384 };
+            let id_lower = id.to_lowercase();
+            let has_vision = id_lower.contains("vision") || id_lower.contains("gpt-4o");
+            let has_tools = id_lower.contains("gpt-4")
+                || id_lower.contains("gpt-3.5")
+                || id_lower.contains("o1")
+                || id_lower.contains("o3");
+            let ctx: u32 = if id_lower.contains("128k") || id_lower.contains("gpt-4o") {
+                128000
+            } else {
+                16384
+            };
             let mut strengths = Vec::new();
-            if id_lower.contains("o1") || id_lower.contains("o3") { strengths.push("reasoning".to_string()); }
-            if has_vision { strengths.push("vision".to_string()); }
+            if id_lower.contains("o1") || id_lower.contains("o3") {
+                strengths.push("reasoning".to_string());
+            }
+            if has_vision {
+                strengths.push("vision".to_string());
+            }
             let mut input_mods = vec!["text".to_string()];
-            if has_vision { input_mods.push("image".to_string()); }
+            if has_vision {
+                input_mods.push("image".to_string());
+            }
 
             let id_clone = id.clone();
             models.push(crate::types::FullModelInfo {
-                id, name: id_clone, provider: "openai".to_string(),
-                description: Some("OpenAI model".to_string()), context_window: ctx, max_output_tokens: ctx,
+                id,
+                name: id_clone,
+                provider: "openai".to_string(),
+                description: Some("OpenAI model".to_string()),
+                context_window: ctx,
+                max_output_tokens: ctx,
                 capabilities: crate::types::ModelCapabilities {
-                    function_calling: has_tools, vision: has_vision, streaming: true,
-                    json_mode: has_tools, caching: false, max_tokens: ctx, context_window: ctx,
-                    input_modalities: input_mods, output_modalities: vec!["text".to_string()], strengths,
+                    function_calling: has_tools,
+                    vision: has_vision,
+                    streaming: true,
+                    json_mode: has_tools,
+                    caching: false,
+                    max_tokens: ctx,
+                    context_window: ctx,
+                    input_modalities: input_mods,
+                    output_modalities: vec!["text".to_string()],
+                    strengths,
                 },
-                pricing: None, created: m["created"].as_u64().unwrap_or(0), available: true,
+                pricing: None,
+                created: m["created"].as_u64().unwrap_or(0),
+                available: true,
             });
         }
         Ok(models)
@@ -325,33 +390,60 @@ impl OpenAIProvider {
     fn known_models_lookup(&self) -> Vec<crate::types::FullModelInfo> {
         vec![
             crate::types::FullModelInfo {
-                id: "gpt-4o".to_string(), name: "GPT-4o".to_string(), provider: "openai".to_string(),
-                description: Some("Optimized GPT-4".to_string()), context_window: 128000, max_output_tokens: 16384,
+                id: "gpt-4o".to_string(),
+                name: "GPT-4o".to_string(),
+                provider: "openai".to_string(),
+                description: Some("Optimized GPT-4".to_string()),
+                context_window: 128000,
+                max_output_tokens: 16384,
                 capabilities: crate::types::ModelCapabilities {
-                    function_calling: true, vision: true, streaming: true, json_mode: true, caching: true,
-                    max_tokens: 16384, context_window: 128000,
+                    function_calling: true,
+                    vision: true,
+                    streaming: true,
+                    json_mode: true,
+                    caching: true,
+                    max_tokens: 16384,
+                    context_window: 128000,
                     input_modalities: vec!["text".to_string(), "image".to_string()],
                     output_modalities: vec!["text".to_string()],
                     strengths: vec!["coding".to_string(), "reasoning".to_string()],
                 },
                 pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.005, completion_tokens: 0.015, image_tokens: None, is_free: false,
+                    prompt_tokens: 0.005,
+                    completion_tokens: 0.015,
+                    image_tokens: None,
+                    is_free: false,
                 }),
-                created: 1714073600, available: true,
+                created: 1714073600,
+                available: true,
             },
             crate::types::FullModelInfo {
-                id: "gpt-4o-mini".to_string(), name: "GPT-4o Mini".to_string(), provider: "openai".to_string(),
-                description: Some("Small, fast model".to_string()), context_window: 128000, max_output_tokens: 16384,
+                id: "gpt-4o-mini".to_string(),
+                name: "GPT-4o Mini".to_string(),
+                provider: "openai".to_string(),
+                description: Some("Small, fast model".to_string()),
+                context_window: 128000,
+                max_output_tokens: 16384,
                 capabilities: crate::types::ModelCapabilities {
-                    function_calling: true, vision: true, streaming: true, json_mode: true, caching: false,
-                    max_tokens: 16384, context_window: 128000,
+                    function_calling: true,
+                    vision: true,
+                    streaming: true,
+                    json_mode: true,
+                    caching: false,
+                    max_tokens: 16384,
+                    context_window: 128000,
                     input_modalities: vec!["text".to_string(), "image".to_string()],
-                    output_modalities: vec!["text".to_string()], strengths: vec![],
+                    output_modalities: vec!["text".to_string()],
+                    strengths: vec![],
                 },
                 pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.00015, completion_tokens: 0.0006, image_tokens: None, is_free: false,
+                    prompt_tokens: 0.00015,
+                    completion_tokens: 0.0006,
+                    image_tokens: None,
+                    is_free: false,
                 }),
-                created: 1718192000, available: true,
+                created: 1718192000,
+                available: true,
             },
         ]
     }
@@ -371,8 +463,8 @@ impl LLMProvider for OpenAIProvider {
 
     fn supports_function_calling(&self, model: &str) -> bool {
         match model {
-            "gpt-4" | "gpt-4-turbo" | "gpt-4o" | "gpt-4o-mini"
-            | "gpt-3.5-turbo" | "o1" | "o1-mini" | "o1-preview" => true,
+            "gpt-4" | "gpt-4-turbo" | "gpt-4o" | "gpt-4o-mini" | "gpt-3.5-turbo" | "o1"
+            | "o1-mini" | "o1-preview" => true,
             _ => self.supports_model(model),
         }
     }
@@ -391,16 +483,17 @@ impl LLMProvider for OpenAIProvider {
     ) -> Result<ChatCompletionResponse> {
         let start = std::time::Instant::now();
 
-        let messages: Vec<Value> = request.messages
+        let messages: Vec<Value> = request
+            .messages
             .iter()
             .map(Self::serialize_message)
             .collect();
-        
+
         let mut body = json!({
             "model": request.model,
             "messages": messages,
         });
-        
+
         if let Some(obj) = body.as_object_mut() {
             if let Some(max_tokens) = request.max_tokens {
                 obj.insert("max_tokens".to_string(), json!(max_tokens));
@@ -461,17 +554,18 @@ impl LLMProvider for OpenAIProvider {
             request.model.clone()
         };
 
-        let messages: Vec<Value> = request.messages
+        let messages: Vec<Value> = request
+            .messages
             .iter()
             .map(Self::serialize_message)
             .collect();
-        
+
         let mut body = json!({
             "model": model,
             "messages": messages,
             "stream": true,
         });
-        
+
         if let Some(obj) = body.as_object_mut() {
             if let Some(max_tokens) = request.max_tokens {
                 obj.insert("max_tokens".to_string(), json!(max_tokens));
@@ -484,7 +578,8 @@ impl LLMProvider for OpenAIProvider {
             }
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -515,30 +610,30 @@ impl LLMProvider for OpenAIProvider {
             let mut chunk_count = 0;
 
             let mut stream = response.bytes_stream();
-            
+
             while let Ok(Some(bytes)) = stream.try_next().await {
                 let bytes_vec = bytes.to_vec();
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
-                
+
                 loop {
                     if let Some(pos) = buffer.find("\n") {
                         let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
-                        
+
                         if line.starts_with("data: ") {
                             let data = &line[6..];
                             if data == "[DONE]" {
                                 break;
                             }
-                            
+
                             match serde_json::from_str::<Value>(data) {
                                 Ok(json) => {
                                     let delta = &json["choices"][0]["delta"]["content"];
                                     if delta.is_null() || !delta.is_string() {
                                         continue;
                                     }
-                                    
+
                                     let content = delta.as_str().unwrap_or("");
                                     if content.is_empty() {
                                         continue;
@@ -596,26 +691,30 @@ impl LLMProvider for OpenAIProvider {
     ) -> Result<ChatCompletionResponse> {
         let start = std::time::Instant::now();
 
-        let messages: Vec<Value> = request.messages
+        let messages: Vec<Value> = request
+            .messages
             .iter()
             .map(Self::serialize_message)
             .collect();
 
-        let tools: Vec<Value> = functions.iter().map(|f| {
-            let mut func_obj = json!({
-                "name": f.name,
-            });
-            if let Some(desc) = &f.description {
-                func_obj["description"] = json!(desc);
-            }
-            if let Some(params) = &f.parameters {
-                func_obj["parameters"] = params.clone();
-            }
-            json!({
-                "type": "function",
-                "function": func_obj,
+        let tools: Vec<Value> = functions
+            .iter()
+            .map(|f| {
+                let mut func_obj = json!({
+                    "name": f.name,
+                });
+                if let Some(desc) = &f.description {
+                    func_obj["description"] = json!(desc);
+                }
+                if let Some(params) = &f.parameters {
+                    func_obj["parameters"] = params.clone();
+                }
+                json!({
+                    "type": "function",
+                    "function": func_obj,
+                })
             })
-        }).collect();
+            .collect();
 
         let mut body = json!({
             "model": request.model,
@@ -691,7 +790,7 @@ impl LLMProvider for OpenAIProvider {
             m if m.starts_with("o1-mini") => 3.0,
             _ => 30.0,
         };
-        
+
         let output_cost_per_million = match request.model.as_str() {
             m if m.starts_with("gpt-4") => 60.0,
             m if m.starts_with("gpt-4o") => 15.0,
@@ -701,16 +800,19 @@ impl LLMProvider for OpenAIProvider {
             m if m.starts_with("o1-mini") => 12.0,
             _ => 60.0,
         };
-        
-        let estimated_prompt_tokens = request.messages.iter()
+
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
-        
+
         let estimated_completion_tokens = request.max_tokens.unwrap_or(1000);
-        
+
         let input_cost = estimated_prompt_tokens as f64 * input_cost_per_million / 1_000_000.0;
-        let output_cost = estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
-        
+        let output_cost =
+            estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
+
         Ok(CostEstimate {
             input_cost,
             output_cost,

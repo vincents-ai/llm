@@ -5,17 +5,17 @@
  */
 
 use async_trait::async_trait;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use futures::Stream;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
-use crate::RateLimitStatus;
+use crate::error::{LLMError, Result};
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 #[derive(Debug, Clone)]
 pub struct ModelListRequest {
@@ -80,7 +80,8 @@ pub trait LLMProvider: Send + Sync {
     /// List all models from this provider with full information
     async fn list_models(&self) -> Result<Vec<FullModelInfo>> {
         // Default implementation - providers should override
-        Ok(self.supported_models()
+        Ok(self
+            .supported_models()
             .iter()
             .map(|model_id| FullModelInfo {
                 id: model_id.clone(),
@@ -89,8 +90,7 @@ pub trait LLMProvider: Send + Sync {
                 description: None,
                 context_window: 0,
                 max_output_tokens: 0,
-                capabilities: self.get_model_capabilities(model_id)
-                    .unwrap_or_default(),
+                capabilities: self.get_model_capabilities(model_id).unwrap_or_default(),
                 pricing: self.get_model_pricing(model_id),
                 created: 0,
                 available: true,
@@ -172,16 +172,14 @@ pub trait LLMProvider: Send + Sync {
 
     /// Get provider health status
     async fn health_check(&self) -> Result<ProviderHealth> {
-        self.rate_limit_status()
-            .await
-            .map(|status| ProviderHealth {
-                name: self.name().to_string(),
-                healthy: true,
-                latency_ms: None,
-                error: None,
-                rate_limit_remaining: status.remaining,
-                rate_limit_total: status.limit,
-            })
+        self.rate_limit_status().await.map(|status| ProviderHealth {
+            name: self.name().to_string(),
+            healthy: true,
+            latency_ms: None,
+            error: None,
+            rate_limit_remaining: status.remaining,
+            rate_limit_total: status.limit,
+        })
     }
 
     /// Get the provider configuration

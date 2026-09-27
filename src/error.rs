@@ -5,8 +5,8 @@
  * rate limiting, model availability, and network issues.
  */
 
-use thiserror::Error;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Result type for LLM operations
 pub type Result<T> = std::result::Result<T, LLMError>;
@@ -211,17 +211,30 @@ impl LLMError {
     pub fn user_message(&self) -> String {
         match self {
             LLMError::AuthenticationError { message, .. } => {
-                format!("Authentication failed: {}. Please check your API key.", message)
+                format!(
+                    "Authentication failed: {}. Please check your API key.",
+                    message
+                )
             }
-            LLMError::RateLimitError { message, retry_after, .. } => {
+            LLMError::RateLimitError {
+                message,
+                retry_after,
+                ..
+            } => {
                 if let Some(seconds) = retry_after {
-                    format!("Rate limit exceeded. Please try again in {} seconds.", seconds)
+                    format!(
+                        "Rate limit exceeded. Please try again in {} seconds.",
+                        seconds
+                    )
                 } else {
                     format!("Rate limit exceeded: {}", message)
                 }
             }
             LLMError::ModelNotAvailable { model, .. } => {
-                format!("Model '{}' is not available. Please try a different model.", model)
+                format!(
+                    "Model '{}' is not available. Please try a different model.",
+                    model
+                )
             }
             LLMError::InvalidRequestError { message, .. } => {
                 format!("Invalid request: {}", message)
@@ -229,9 +242,7 @@ impl LLMError {
             LLMError::HttpError { message, .. } => {
                 format!("Network error: {}", message)
             }
-            LLMError::TimeoutError { .. } => {
-                "The request timed out. Please try again.".to_string()
-            }
+            LLMError::TimeoutError { .. } => "The request timed out. Please try again.".to_string(),
             LLMError::ProviderError { message, .. } => {
                 format!("Provider error: {}", message)
             }

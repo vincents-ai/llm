@@ -31,7 +31,7 @@ pub use error::{LLMError, Result};
 pub use types::*;
 
 // Provider trait and implementations
-pub use provider::{LLMProvider, ProviderRegistry, ProviderHealth};
+pub use provider::{LLMProvider, ProviderHealth, ProviderRegistry};
 
 #[cfg(feature = "openai")]
 pub use openai::OpenAIProvider;
@@ -49,17 +49,22 @@ pub use ollama::OllamaProvider;
 pub use openrouter::OpenRouterProvider;
 
 // Supporting infrastructure
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitOpenError, CircuitState,
+};
 pub use cost_tracker::{CostEstimate, CostTracker};
-pub use rate_limiter::{RateLimiter, RateLimitStatus, RetryConfig, RetryPolicy, RetryStrategy};
 pub use provider_manager::ProviderManager;
-pub use telemetry::{LlmTelemetryAttributes, LlmTelemetryRecorder, TelemetrySpan, NoopTelemetryRecorder, TracingTelemetryRecorder};
-pub use token_counter::{TokenCounter, TokenCounterConfig, TokenCount, TokenCountingError};
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitState, CircuitOpenError};
+pub use rate_limiter::{RateLimitStatus, RateLimiter, RetryConfig, RetryPolicy, RetryStrategy};
+pub use telemetry::{
+    LlmTelemetryAttributes, LlmTelemetryRecorder, NoopTelemetryRecorder, TelemetrySpan,
+    TracingTelemetryRecorder,
+};
+pub use token_counter::{TokenCount, TokenCounter, TokenCounterConfig, TokenCountingError};
 
-pub mod provider;
 pub mod circuit_breaker;
 mod cost_tracker;
-mod rate_limiter;
+pub mod provider;
 pub mod provider_manager;
+mod rate_limiter;
 mod telemetry;
 mod token_counter;

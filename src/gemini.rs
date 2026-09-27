@@ -5,15 +5,15 @@
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use serde_json::json;
+use std::pin::Pin;
 
-use crate::types::*;
-use crate::error::{LLMError, Result};
 use crate::config::ProviderConfig;
+use crate::error::{LLMError, Result};
 use crate::provider::LLMProvider;
-use crate::RateLimitStatus;
+use crate::types::*;
 use crate::CostEstimate;
+use crate::RateLimitStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiConfig {
@@ -52,7 +52,11 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
                 "parts": [{"text": content}]
             })
         }
-        ChatMessage::Assistant { content, tool_calls, .. } => {
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
             let mut parts = Vec::new();
             if let Some(text) = content {
                 if !text.is_empty() {
@@ -62,8 +66,8 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
             if let Some(calls) = tool_calls {
                 for tc in calls {
                     if let ToolCall::Function(FunctionCall::Custom(custom)) = tc {
-                        let args: serde_json::Value = serde_json::from_str(&custom.arguments)
-                            .unwrap_or(json!({}));
+                        let args: serde_json::Value =
+                            serde_json::from_str(&custom.arguments).unwrap_or(json!({}));
                         parts.push(json!({
                             "functionCall": {
                                 "name": custom.name,
@@ -81,7 +85,10 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
                 "parts": parts,
             })
         }
-        ChatMessage::Tool { tool_call_id, content } => {
+        ChatMessage::Tool {
+            tool_call_id,
+            content,
+        } => {
             json!({
                 "role": "user",
                 "parts": [{
@@ -115,17 +122,20 @@ fn parse_response_parts(parts: &[serde_json::Value]) -> (Option<String>, Vec<Too
             text_parts.push(text.to_string());
         }
         if let Some(fc) = part.get("functionCall") {
-            let name = fc.get("name")
+            let name = fc
+                .get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
             let args = fc.get("args").cloned().unwrap_or(json!({}));
             let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-            tool_calls.push(ToolCall::Function(FunctionCall::Custom(CustomFunctionCall {
-                id: None,
-                name,
-                arguments,
-            })));
+            tool_calls.push(ToolCall::Function(FunctionCall::Custom(
+                CustomFunctionCall {
+                    id: None,
+                    name,
+                    arguments,
+                },
+            )));
         }
     }
 
@@ -156,7 +166,7 @@ fn normalize_finish_reason(raw: Option<&str>, has_tool_calls: bool) -> Option<St
 impl GeminiProvider {
     pub async fn new(api_key: impl Into<String>) -> Result<Self> {
         let client = reqwest::Client::new();
-        
+
         Ok(Self {
             config: GeminiConfig {
                 api_key: api_key.into(),
@@ -198,14 +208,18 @@ impl GeminiProvider {
         })
     }
 
-    async fn send_request(&self, model: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+    async fn send_request(
+        &self,
+        model: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model,
-            self.config.api_key
+            model, self.config.api_key
         );
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -227,7 +241,9 @@ impl GeminiProvider {
             });
         }
 
-        response.json().await
+        response
+            .json()
+            .await
             .map_err(|e| LLMError::SerializationError {
                 message: e.to_string(),
                 context: Some("Failed to parse Gemini response".to_string()),
@@ -273,9 +289,15 @@ impl GeminiProvider {
             .collect();
 
         let usage = json.get("usageMetadata").map(|u| {
-            let prompt_tokens = u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let completion_tokens = u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            
+            let prompt_tokens = u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let completion_tokens = u
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+
             Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -296,11 +318,12 @@ impl GeminiProvider {
         }
     }
 
-    fn build_body(messages: &[ChatMessage], _model: &str, request: &ChatCompletionRequest) -> serde_json::Value {
-        let contents: Vec<serde_json::Value> = messages
-            .iter()
-            .map(convert_message)
-            .collect();
+    fn build_body(
+        messages: &[ChatMessage],
+        _model: &str,
+        request: &ChatCompletionRequest,
+    ) -> serde_json::Value {
+        let contents: Vec<serde_json::Value> = messages.iter().map(convert_message).collect();
 
         let mut body = json!({
             "contents": contents,
@@ -323,7 +346,10 @@ impl GeminiProvider {
 
     /// Fetch models from Google's Gemini API.
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        let base = self.config.base_url.as_deref()
+        let base = self
+            .config
+            .base_url
+            .as_deref()
             .unwrap_or("https://generativelanguage.googleapis.com/v1beta");
         let url = if self.config.api_key.is_empty() {
             format!("{}/models", base)
@@ -331,10 +357,16 @@ impl GeminiProvider {
             format!("{}/models?key={}", base, self.config.api_key)
         };
 
-        let resp = self.client.get(&url).send().await.map_err(|e| crate::error::LLMError::HttpError {
-            message: format!("Failed to fetch Gemini models: {}", e),
-            status_code: None, body: None,
-        })?;
+        let resp =
+            self.client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| crate::error::LLMError::HttpError {
+                    message: format!("Failed to fetch Gemini models: {}", e),
+                    status_code: None,
+                    body: None,
+                })?;
 
         if !resp.status().is_success() {
             return Err(crate::error::LLMError::HttpError {
@@ -344,42 +376,66 @@ impl GeminiProvider {
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| crate::error::LLMError::SerializationError {
-            message: e.to_string(),
-            context: Some("Failed to parse Gemini models".to_string()),
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| crate::error::LLMError::SerializationError {
+                    message: e.to_string(),
+                    context: Some("Failed to parse Gemini models".to_string()),
+                })?;
+        let data = json["models"].as_array().ok_or_else(|| {
+            crate::error::LLMError::SerializationError {
+                message: "Missing 'models' array".to_string(),
+                context: None,
+            }
         })?;
-        let data = json["models"].as_array()
-            .ok_or_else(|| crate::error::LLMError::SerializationError {
-                message: "Missing 'models' array".to_string(), context: None,
-            })?;
 
-        Ok(data.iter().filter_map(|m| {
-            let name = m["name"].as_str()?.to_string();
-            let id = name.strip_prefix("models/").unwrap_or(&name).to_string();
-            let display_name = m["displayName"].as_str().unwrap_or(&id).to_string();
-            let description = m["description"].as_str().map(String::from);
-            let input_limit = m["inputTokenLimit"].as_u64().unwrap_or(0) as u32;
-            let output_limit = m["outputTokenLimit"].as_u64().unwrap_or(0) as u32;
-            let has_vision = id.contains("pro") || id.contains("flash");
+        Ok(data
+            .iter()
+            .filter_map(|m| {
+                let name = m["name"].as_str()?.to_string();
+                let id = name.strip_prefix("models/").unwrap_or(&name).to_string();
+                let display_name = m["displayName"].as_str().unwrap_or(&id).to_string();
+                let description = m["description"].as_str().map(String::from);
+                let input_limit = m["inputTokenLimit"].as_u64().unwrap_or(0) as u32;
+                let output_limit = m["outputTokenLimit"].as_u64().unwrap_or(0) as u32;
+                let has_vision = id.contains("pro") || id.contains("flash");
 
-            let mut input_mods = vec!["text".to_string()];
-            if has_vision { input_mods.push("image".to_string()); }
+                let mut input_mods = vec!["text".to_string()];
+                if has_vision {
+                    input_mods.push("image".to_string());
+                }
 
-            Some(crate::types::FullModelInfo {
-                id, name: display_name, provider: "gemini".to_string(), description,
-                context_window: input_limit, max_output_tokens: output_limit,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true, vision: has_vision, streaming: true, json_mode: true,
-                    caching: false, max_tokens: output_limit, context_window: input_limit,
-                    input_modalities: input_mods, output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.0, completion_tokens: 0.0, image_tokens: None, is_free: true,
-                }),
-                created: 0, available: true,
+                Some(crate::types::FullModelInfo {
+                    id,
+                    name: display_name,
+                    provider: "gemini".to_string(),
+                    description,
+                    context_window: input_limit,
+                    max_output_tokens: output_limit,
+                    capabilities: crate::types::ModelCapabilities {
+                        function_calling: true,
+                        vision: has_vision,
+                        streaming: true,
+                        json_mode: true,
+                        caching: false,
+                        max_tokens: output_limit,
+                        context_window: input_limit,
+                        input_modalities: input_mods,
+                        output_modalities: vec!["text".to_string()],
+                        strengths: vec![],
+                    },
+                    pricing: Some(crate::types::ModelPricing {
+                        prompt_tokens: 0.0,
+                        completion_tokens: 0.0,
+                        image_tokens: None,
+                        is_free: true,
+                    }),
+                    created: 0,
+                    available: true,
+                })
             })
-        }).collect())
+            .collect())
     }
 }
 
@@ -428,10 +484,8 @@ impl LLMProvider for GeminiProvider {
             request.model.clone()
         };
 
-        let contents: Vec<serde_json::Value> = request.messages
-            .iter()
-            .map(convert_message)
-            .collect();
+        let contents: Vec<serde_json::Value> =
+            request.messages.iter().map(convert_message).collect();
 
         let mut body = serde_json::json!({
             "contents": contents,
@@ -452,11 +506,11 @@ impl LLMProvider for GeminiProvider {
 
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model,
-            self.config.api_key
+            model, self.config.api_key
         );
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -485,12 +539,12 @@ impl LLMProvider for GeminiProvider {
             let mut chunk_count = 0;
 
             let mut stream = response.bytes_stream();
-            
+
             while let Ok(Some(bytes)) = stream.try_next().await {
                 let bytes_vec = bytes.to_vec();
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
-                
+
                 loop {
                     if buffer.is_empty() {
                         break;
@@ -500,9 +554,9 @@ impl LLMProvider for GeminiProvider {
                     match serde_json::from_str::<serde_json::Value>(&buffer) {
                         Ok(json) => {
                             buffer.clear();
-                            
+
                             let candidates = json["candidates"].as_array().unwrap_or(&empty_vec);
-                            
+
                             for candidate in candidates {
                                 let content = candidate["content"]["parts"][0]["text"]
                                     .as_str()
@@ -567,30 +621,35 @@ impl LLMProvider for GeminiProvider {
             request.model.clone()
         };
 
-        let function_declarations: Vec<serde_json::Value> = functions.iter().map(|f| {
-            let mut decl = json!({
-                "name": f.name,
-            });
-            if let Some(desc) = &f.description {
-                decl["description"] = json!(desc);
-            }
-            if let Some(params) = &f.parameters {
-                decl["parameters"] = params.clone();
-            }
-            decl
-        }).collect();
+        let function_declarations: Vec<serde_json::Value> = functions
+            .iter()
+            .map(|f| {
+                let mut decl = json!({
+                    "name": f.name,
+                });
+                if let Some(desc) = &f.description {
+                    decl["description"] = json!(desc);
+                }
+                if let Some(params) = &f.parameters {
+                    decl["parameters"] = params.clone();
+                }
+                decl
+            })
+            .collect();
 
         let tools = json!([{ "functionDeclarations": function_declarations }]);
         let tool_config = json!({
             "functionCallingConfig": { "mode": "AUTO" }
         });
 
-        let non_system_messages: Vec<&ChatMessage> = request.messages
+        let non_system_messages: Vec<&ChatMessage> = request
+            .messages
             .iter()
             .filter(|m| m.role() != MessageRole::System)
             .collect();
 
-        let system_messages: Vec<&ChatMessage> = request.messages
+        let system_messages: Vec<&ChatMessage> = request
+            .messages
             .iter()
             .filter(|m| m.role() == MessageRole::System)
             .collect();
@@ -670,14 +729,17 @@ impl LLMProvider for GeminiProvider {
             _ => 5.0,
         };
 
-        let estimated_prompt_tokens = request.messages.iter()
+        let estimated_prompt_tokens = request
+            .messages
+            .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
 
         let estimated_completion_tokens = request.max_tokens.unwrap_or(1000);
 
         let input_cost = estimated_prompt_tokens as f64 * input_cost_per_million / 1_000_000.0;
-        let output_cost = estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
+        let output_cost =
+            estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
 
         Ok(CostEstimate {
             input_cost,
