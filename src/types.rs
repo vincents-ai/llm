@@ -108,6 +108,93 @@ impl ChatMessage {
         }
     }
 
+    /// Serialize this message into the OpenAI Chat Completions wire shape.
+    ///
+    /// One canonical serializer for the protocol, used by every provider that
+    /// speaks it and by every request path. The duplication this replaces is
+    /// what produced the OpenRouter defect: three hand-written copies of the
+    /// same match, two of which mapped `tool` and `function` onto `user` and so
+    /// silently destroyed native tool-call conversations.
+    ///
+    /// The shapes preserved, per the brief's required round-trip:
+    ///
+    /// ```text
+    /// system
+    /// user
+    /// assistant
+    /// assistant + tool_calls
+    /// tool + tool_call_id
+    /// function + name        (legacy spelling of an assistant tool call)
+    /// ```
+    pub fn to_openai_json(&self) -> serde_json::Value {
+        use serde_json::{json, Value};
+        match self {
+            ChatMessage::System { content, name } => {
+                let mut obj = json!({ "role": "system", "content": content });
+                if let Some(name) = name {
+                    obj["name"] = json!(name);
+                }
+                obj
+            }
+            ChatMessage::User { content, name } => {
+                let mut obj = json!({ "role": "user", "content": content });
+                if let Some(name) = name {
+                    obj["name"] = json!(name);
+                }
+                obj
+            }
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+                name,
+            } => {
+                let mut obj = json!({
+                    "role": "assistant",
+                    // `null` rather than an omitted key: the API distinguishes
+                    // "no content" from "content not supplied" for assistant
+                    // turns that carry only tool calls.
+                    "content": content.clone().map(Value::String).unwrap_or(Value::Null),
+                });
+                if let Some(tool_calls) = tool_calls {
+                    let serialized: Vec<Value> = tool_calls
+                        .iter()
+                        .map(crate::types::serialize_tool_call)
+                        .collect();
+                    if !serialized.is_empty() {
+                        obj["tool_calls"] = json!(serialized);
+                    }
+                }
+                if let Some(name) = name {
+                    obj["name"] = json!(name);
+                }
+                obj
+            }
+            ChatMessage::Function { name, arguments } => {
+                // The legacy single-function message. `content` carries the
+                // arguments, which is what the wire format means by it.
+                json!({
+                    "role": "function",
+                    "name": name,
+                    "content": arguments,
+                })
+            }
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => {
+                // `tool_call_id` is the whole point of a tool message: it is what
+                // links the result back to the call. Dropping it, or rewording
+                // the role to `user`, breaks the conversation rather than
+                // merely changing its shape.
+                json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                })
+            }
+        }
+    }
+
     /// Get the role of the message
     pub fn role(&self) -> MessageRole {
         match self {
@@ -201,6 +288,26 @@ pub struct ToolCallDelta {
     pub tool_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function: Option<FunctionCall>,
+}
+
+/// Serialize a `ToolCall` into the OpenAI wire shape.
+pub fn serialize_tool_call(tool_call: &ToolCall) -> serde_json::Value {
+    use serde_json::{json, Value};
+    match tool_call {
+        ToolCall::Function(FunctionCall::Custom(custom)) => json!({
+            "id": custom.id.as_deref().unwrap_or(""),
+            "type": "function",
+            "function": {
+                "name": custom.name,
+                "arguments": custom.arguments,
+            }
+        }),
+        // Every other variant is preserved verbatim rather than dropped. A tool
+        // call the protocol evolves past should reach the provider as-is, not
+        // disappear: a silently omitted call reads to an agent as "the model
+        // chose not to call a tool".
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
+    }
 }
 
 /// Streaming choice delta

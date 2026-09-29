@@ -78,86 +78,12 @@ impl OpenAIProvider {
             .unwrap_or("https://api.openai.com/v1")
     }
 
+    /// Serialize a message for the wire.
+    ///
+    /// Delegates to the protocol-level serializer so this provider and
+    /// OpenRouter cannot drift apart -- the two speak the same dialect.
     fn serialize_message(msg: &ChatMessage) -> Value {
-        match msg {
-            ChatMessage::System { content, name } => {
-                let mut obj = json!({
-                    "role": "system",
-                    "content": content,
-                });
-                if let Some(name) = name {
-                    obj["name"] = json!(name);
-                }
-                obj
-            }
-            ChatMessage::User { content, name } => {
-                let mut obj = json!({
-                    "role": "user",
-                    "content": content,
-                });
-                if let Some(name) = name {
-                    obj["name"] = json!(name);
-                }
-                obj
-            }
-            ChatMessage::Assistant {
-                content,
-                tool_calls,
-                name,
-            } => {
-                let mut obj = json!({
-                    "role": "assistant",
-                });
-                if let Some(content) = content {
-                    obj["content"] = json!(content);
-                } else {
-                    obj["content"] = Value::Null;
-                }
-                if let Some(tool_calls) = tool_calls {
-                    let serialized: Vec<Value> = tool_calls
-                        .iter()
-                        .filter_map(|tc| {
-                            if let ToolCall::Function(FunctionCall::Custom(custom)) = tc {
-                                Some(json!({
-                                    "id": custom.id.as_deref().unwrap_or(""),
-                                    "type": "function",
-                                    "function": {
-                                        "name": custom.name,
-                                        "arguments": custom.arguments,
-                                    }
-                                }))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if !serialized.is_empty() {
-                        obj["tool_calls"] = json!(serialized);
-                    }
-                }
-                if let Some(name) = name {
-                    obj["name"] = json!(name);
-                }
-                obj
-            }
-            ChatMessage::Tool {
-                tool_call_id,
-                content,
-            } => {
-                json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                })
-            }
-            ChatMessage::Function { name, arguments } => {
-                json!({
-                    "role": "function",
-                    "name": name,
-                    "content": arguments,
-                })
-            }
-        }
+        msg.to_openai_json()
     }
 
     fn parse_assistant_message(msg: &Value) -> ChatMessage {

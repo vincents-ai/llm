@@ -308,26 +308,12 @@ impl LLMProvider for OpenRouterProvider {
             request.model.clone()
         };
 
-        // Convert messages to OpenRouter format
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role() {
-                    MessageRole::System => "system",
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                    MessageRole::Function | MessageRole::Tool => "user",
-                };
-
-                let content = msg.content().map(|s| s.to_string()).unwrap_or_default();
-
-                json!({
-                    "role": role,
-                    "content": content
-                })
-            })
-            .collect();
+        // OpenRouter speaks the OpenAI Chat Completions dialect, so the same
+        // serializer serves both. The three hand-written copies this replaces
+        // are why `tool` and `function` messages were being rewritten to `user`:
+        // the bug lived in the duplication, not in the mapping.
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(ChatMessage::to_openai_json).collect();
 
         let mut body = json!({
             "model": model,
@@ -476,25 +462,10 @@ impl LLMProvider for OpenRouterProvider {
             request.model.clone()
         };
 
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role() {
-                    MessageRole::System => "system",
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                    MessageRole::Function | MessageRole::Tool => "user",
-                };
-
-                let content = msg.content().map(|s| s.to_string()).unwrap_or_default();
-
-                serde_json::json!({
-                    "role": role,
-                    "content": content
-                })
-            })
-            .collect();
+        // The same serializer the non-streaming path uses, so the two cannot
+        // drift.
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(ChatMessage::to_openai_json).collect();
 
         let mut body = serde_json::json!({
             "model": model,

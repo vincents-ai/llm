@@ -599,3 +599,134 @@ async fn the_harness_actually_reaches_the_server() {
     assert_eq!(seen.len(), 1, "the harness must reach the mock server");
     assert_eq!(seen[0].url.path(), "/chat/completions");
 }
+
+/// The brief's §5 required round-trip matrix, asserted on the wire.
+///
+/// The P0 test above checks the two roles that were being rewritten. This one
+/// covers the whole set, because a fix that restores `tool` while dropping
+/// `tool_call_id` — or dropping assistant `tool_calls` — would pass that test and
+/// still break the conversation.
+#[tokio::test]
+async fn openrouter_preserves_the_whole_message_vocabulary() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+
+    use vincents_llm::types::{CustomFunctionCall, FunctionCall, ToolCall};
+    let request = ChatCompletionRequest {
+        model: "openai/gpt-4o".into(),
+        messages: vec![
+            ChatMessage::system("be brief"),
+            ChatMessage::user("what is the weather in Oslo?"),
+            ChatMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![ToolCall::Function(FunctionCall::Custom(
+                    CustomFunctionCall {
+                        id: Some("call_a".into()),
+                        name: "get_weather".into(),
+                        arguments: r#"{"city":"Oslo"}"#.into(),
+                    },
+                ))]),
+                name: None,
+            },
+            ChatMessage::Tool {
+                tool_call_id: "call_a".into(),
+                content: "72F and sunny".into(),
+            },
+            ChatMessage::Function {
+                name: "get_time".into(),
+                arguments: r#"{"tz":"UTC"}"#.into(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    openrouter(&server)
+        .chat_completion(request)
+        .await
+        .expect("request succeeds");
+
+    let body = captured_body(&server).await;
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(messages[0]["role"], "system", "{body}");
+    assert_eq!(messages[1]["role"], "user", "{body}");
+    assert_eq!(messages[2]["role"], "assistant", "{body}");
+    assert_eq!(
+        messages[2]["tool_calls"][0]["id"],
+        "call_a",
+        "assistant tool_calls must survive: {body}"
+    );
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["name"],
+        "get_weather",
+        "{body}"
+    );
+    assert_eq!(
+        messages[2]["content"],
+        Value::Null,
+        "a tool-call turn has null content, not an empty string: {body}"
+    );
+    assert_eq!(messages[3]["role"], "tool", "{body}");
+    assert_eq!(
+        messages[3]["tool_call_id"], "call_a",
+        "tool_call_id links the result back to the call and must survive: {body}"
+    );
+    assert_eq!(messages[4]["role"], "function", "{body}");
+    assert_eq!(messages[4]["name"], "get_time", "{body}");
+}
+
+/// The same conversation through both providers must serialise identically.
+///
+/// OpenRouter speaks the OpenAI dialect, so any difference here is a bug in one
+/// of them rather than a legitimate protocol difference.
+#[tokio::test]
+async fn openai_and_openrouter_serialise_the_same_conversation_identically() {
+    let conversation = vec![
+        ChatMessage::system("be brief"),
+        ChatMessage::user("hi"),
+        ChatMessage::Tool {
+            tool_call_id: "call_a".into(),
+            content: "result".into(),
+        },
+    ];
+
+    let oa_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&oa_server)
+        .await;
+    openai(&oa_server)
+        .chat_completion(ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: conversation.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("openai request");
+    let oa_messages = captured_body(&oa_server).await["messages"].clone();
+
+    let or_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&or_server)
+        .await;
+    openrouter(&or_server)
+        .chat_completion(ChatCompletionRequest {
+            model: "openai/gpt-4o".into(),
+            messages: conversation,
+            ..Default::default()
+        })
+        .await
+        .expect("openrouter request");
+    let or_messages = captured_body(&or_server).await["messages"].clone();
+
+    assert_eq!(
+        oa_messages, or_messages,
+        "the two providers diverge on the same conversation"
+    );
+}
