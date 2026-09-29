@@ -303,75 +303,43 @@ impl OpenAIProvider {
                     input_modalities: input_mods,
                     output_modalities: vec!["text".to_string()],
                     strengths,
-                },
+                                        source: crate::types::CapabilitySource::Heuristic,
+                    },
                 pricing: None,
                 created: m["created"].as_u64().unwrap_or(0),
                 available: true,
-            });
+                                supported_parameters: Default::default(),
+                });
         }
         Ok(models)
     }
 
-    /// Hardcoded fallback models.
+    /// Fallback model descriptors, when the live listing is unavailable.
+    ///
+    /// Built from the versioned catalog rather than a list literal in the
+    /// provider, so a price change is a data change. Only OpenAI's own models
+    /// are included: a fallback for a model this provider does not serve would
+    /// be exactly the unrelated-price substitution the brief forbids.
     fn known_models_lookup(&self) -> Vec<crate::types::FullModelInfo> {
-        vec![
-            crate::types::FullModelInfo {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4o".to_string(),
+        crate::pricing::catalog()
+            .values()
+            .filter(|descriptor| {
+                descriptor.id.starts_with("gpt-") || descriptor.id.starts_with("o1")
+            })
+            .map(|descriptor| crate::types::FullModelInfo {
+                id: descriptor.id.to_string(),
+                name: descriptor.id.to_string(),
                 provider: "openai".to_string(),
-                description: Some("Optimized GPT-4".to_string()),
-                context_window: 128000,
-                max_output_tokens: 16384,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 16384,
-                    context_window: 128000,
-                    input_modalities: vec!["text".to_string(), "image".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec!["coding".to_string(), "reasoning".to_string()],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.005,
-                    completion_tokens: 0.015,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1714073600,
+                description: None,
+                context_window: descriptor.context_window,
+                max_output_tokens: descriptor.max_output_tokens,
+                capabilities: descriptor.capabilities.clone(),
+                pricing: descriptor.pricing.clone(),
+                created: 0,
                 available: true,
-            },
-            crate::types::FullModelInfo {
-                id: "gpt-4o-mini".to_string(),
-                name: "GPT-4o Mini".to_string(),
-                provider: "openai".to_string(),
-                description: Some("Small, fast model".to_string()),
-                context_window: 128000,
-                max_output_tokens: 16384,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: true,
-                    vision: true,
-                    streaming: true,
-                    json_mode: true,
-                    caching: false,
-                    max_tokens: 16384,
-                    context_window: 128000,
-                    input_modalities: vec!["text".to_string(), "image".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths: vec![],
-                },
-                pricing: Some(crate::types::ModelPricing {
-                    prompt_tokens: 0.00015,
-                    completion_tokens: 0.0006,
-                    image_tokens: None,
-                    is_free: false,
-                }),
-                created: 1718192000,
-                available: true,
-            },
-        ]
+                supported_parameters: Default::default(),
+            })
+            .collect()
     }
 }
 

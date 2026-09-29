@@ -424,6 +424,7 @@ impl GeminiProvider {
                         input_modalities: input_mods,
                         output_modalities: vec!["text".to_string()],
                         strengths: vec![],
+                                            source: crate::types::CapabilitySource::Heuristic,
                     },
                     pricing: Some(crate::types::ModelPricing {
                         prompt_tokens: 0.0,
@@ -433,6 +434,7 @@ impl GeminiProvider {
                     }),
                     created: 0,
                     available: true,
+                                    supported_parameters: Default::default(),
                 })
             })
             .collect())

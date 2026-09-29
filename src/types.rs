@@ -558,6 +558,16 @@ pub struct FullModelInfo {
     /// Whether the model is currently available
     #[serde(default = "default_true")]
     pub available: bool,
+    /// The parameter names the provider says this model accepts.
+    ///
+    /// OpenRouter reports this directly and it is the authoritative answer to
+    /// "can I send `reasoning_effort` to this model?". It was previously parsed
+    /// into three booleans and then thrown away, so the list — the part that
+    /// scales to parameters nobody has typed yet — did not survive.
+    ///
+    /// Empty means *not reported*, not *supports nothing*.
+    #[serde(default)]
+    pub supported_parameters: std::collections::BTreeSet<String>,
 }
 
 fn default_true() -> bool {
@@ -565,7 +575,7 @@ fn default_true() -> bool {
 }
 
 /// Pricing information for a model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelPricing {
     pub prompt_tokens: f64,     // Cost per 1K input tokens
     pub completion_tokens: f64, // Cost per 1K output tokens
@@ -597,6 +607,75 @@ pub struct ModelCapabilities {
     /// Model strengths (e.g. "coding", "reasoning", "math", "creative")
     #[serde(default)]
     pub strengths: Vec<String>,
+    /// Where these capability values came from.
+    ///
+    /// The booleans above cannot express "we do not know", and a guessed `false`
+    /// is indistinguishable from a real "this model has no tool support". Every
+    /// field is therefore qualified by how it was obtained, and a caller that
+    /// must not act on a guess reads this first.
+    #[serde(default)]
+    pub source: CapabilitySource,
+}
+
+/// How a capability value was determined.
+///
+/// Ordered by decreasing authority. The brief's rule is that nothing should be
+/// reported as an authoritative capability claim on the strength of a model-name
+/// substring match, so `Heuristic` is a real, observable state rather than
+/// something the parsers quietly imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilitySource {
+    /// Not determined. The booleans are defaults, not findings.
+    Unknown,
+    /// Derived from a substring match against the model name. Weak, and
+    /// explicitly not authoritative.
+    Heuristic,
+    /// From a maintained, versioned descriptor or pricing catalog.
+    Descriptor,
+    /// Stated by the provider in its own response.
+    Provider,
+}
+
+impl Default for CapabilitySource {
+    fn default() -> Self {
+        CapabilitySource::Unknown
+    }
+}
+
+impl CapabilitySource {
+    /// Whether the capabilities may be relied on for a routing decision.
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, CapabilitySource::Provider | CapabilitySource::Descriptor)
+    }
+}
+
+impl ModelCapabilities {
+    /// Build capabilities from a maintained catalog entry.
+    pub fn from_descriptor(values: Self) -> Self {
+        Self {
+            source: CapabilitySource::Descriptor,
+            ..values
+        }
+    }
+
+    /// Build capabilities inferred from a model name.
+    ///
+    /// The `source` is the point: a caller can tell this apart from a fact.
+    pub fn from_heuristic(values: Self) -> Self {
+        Self {
+            source: CapabilitySource::Heuristic,
+            ..values
+        }
+    }
+
+    /// Build capabilities the provider itself reported.
+    pub fn from_provider(values: Self) -> Self {
+        Self {
+            source: CapabilitySource::Provider,
+            ..values
+        }
+    }
 }
 
 /// A model variant

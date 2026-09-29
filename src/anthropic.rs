@@ -431,15 +431,43 @@ impl AnthropicProvider {
             };
 
             let display_name = m["display_name"].as_str().unwrap_or(&id).to_string();
-            let id_lower = id.to_lowercase();
-            let has_vision = id_lower.contains("claude-3");
-            let has_tools = id_lower.contains("claude-3") || id_lower.contains("claude-4");
-            let ctx: u32 = 200000;
+
+            // Capabilities and the context window come from the catalog when it
+            // knows the model, and are otherwise reported as `Unknown` rather
+            // than guessed.
+            //
+            // The previous code derived `has_vision` from
+            // `id_lower.contains("claude-3")` and hardcoded `ctx = 200000` for
+            // *every* Anthropic model. A substring match is not a capability, and
+            // a hardcoded context window is wrong for every model that does not
+            // happen to have 200k. §40 is explicit that `Unknown` is better than
+            // confidently reporting false data.
+            let catalogued = crate::pricing::descriptor_for(&id);
+            let ctx = catalogued.map(|d| d.context_window).unwrap_or(0);
+            let max_output_tokens = catalogued.map(|d| d.max_output_tokens).unwrap_or(0);
+            let capabilities = match catalogued {
+                Some(descriptor) => {
+                    let mut capabilities = descriptor.capabilities.clone();
+                    capabilities.max_tokens = max_output_tokens;
+                    capabilities.context_window = ctx;
+                    capabilities
+                }
+                // No catalog entry: report nothing we cannot back. `streaming` is
+                // a property of Anthropic's API rather than of the model name,
+                // so it is the one flag stated without catalog support.
+                None => ModelCapabilities {
+                    streaming: true,
+                    ..Default::default()
+                },
+            };
 
             let mut strengths = vec!["reasoning".to_string(), "coding".to_string()];
-            if has_vision {
+            if capabilities.vision {
                 strengths.push("vision".to_string());
             }
+
+            // Looked up before `id` is moved into the struct below.
+            let pricing = crate::pricing::price_for(&id);
 
             models.push(crate::types::FullModelInfo {
                 id,
@@ -447,23 +475,16 @@ impl AnthropicProvider {
                 provider: "anthropic".to_string(),
                 description: None,
                 context_window: ctx,
-                max_output_tokens: 8192,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: has_tools,
-                    vision: has_vision,
-                    streaming: true,
-                    json_mode: true,
-                    caching: true,
-                    max_tokens: 8192,
-                    context_window: ctx,
-                    input_modalities: vec!["text".to_string(), "image".to_string()],
-                    output_modalities: vec!["text".to_string()],
-                    strengths,
-                },
-                pricing: None,
+                max_output_tokens,
+                capabilities,
+                // Anthropic's model list carries no prices, so this is either
+                // a dated catalog claim or nothing. Never a guess, and never
+                // another model's price.
+                pricing,
                 created: 0,
                 available: true,
-            });
+                                supported_parameters: Default::default(),
+                });
         }
         Ok(models)
     }

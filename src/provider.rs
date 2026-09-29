@@ -94,7 +94,8 @@ pub trait LLMProvider: Send + Sync {
                 pricing: self.get_model_pricing(model_id),
                 created: 0,
                 available: true,
-            })
+                supported_parameters: Default::default(),
+})
             .collect())
     }
 

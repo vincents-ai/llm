@@ -205,8 +205,11 @@ impl LLMProvider for OpenRouterProvider {
                     .unwrap_or_default();
                 let has_vision = input_modalities.iter().any(|m| m == "image");
 
-                // Parse supported parameters → capabilities
-                let params: Vec<String> = m["supported_parameters"]
+                // Parse supported parameters → capabilities, and *keep the list*.
+                // It was previously reduced to three booleans and thrown away,
+                // which discarded the part that scales: a parameter this crate
+                // has never heard of, reported truthfully by the provider.
+                let params: std::collections::BTreeSet<String> = m["supported_parameters"]
                     .as_array()
                     .map(|a| {
                         a.iter()
@@ -282,6 +285,9 @@ impl LLMProvider for OpenRouterProvider {
                         input_modalities,
                         output_modalities,
                         strengths,
+                        // The provider stated these in its own response, so they
+                        // are the authoritative kind — not a guess.
+                        source: crate::types::CapabilitySource::Provider,
                     },
                     pricing: Some(ModelPricing {
                         prompt_tokens: prompt_per_1k,
@@ -291,6 +297,10 @@ impl LLMProvider for OpenRouterProvider {
                     }),
                     created,
                     available: true,
+                    // The parameter list the provider reported, preserved. This
+                    // is what makes `require_parameters`-style routing decidable
+                    // locally without guessing from the model name.
+                    supported_parameters: params.clone(),
                 }
             })
             .collect();
