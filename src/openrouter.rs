@@ -20,6 +20,14 @@ use crate::RateLimitStatus;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenRouterConfig {
     pub api_key: String,
+    /// Override the API base URL.
+    ///
+    /// Added for the same reason `OpenAIConfig` has one: without it the
+    /// provider cannot be pointed at a mock server, so none of its wire
+    /// behaviour can be tested. The brief's OpenRouter P0 — a `tool` message
+    /// being rewritten to `user` — is only observable on the wire, so this is a
+    /// prerequisite for closing it rather than a nicety.
+    pub base_url: Option<String>,
     pub referrer: Option<String>,
     pub default_route: Option<String>,
     pub default_model: Option<String>,
@@ -30,6 +38,7 @@ impl Default for OpenRouterConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            base_url: None,
             referrer: None,
             default_route: None,
             default_model: None,
@@ -94,7 +103,10 @@ impl OpenRouterProvider {
     }
 
     fn get_base_url(&self) -> &str {
-        "https://openrouter.ai/api/v1"
+        self.config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://openrouter.ai/api/v1")
     }
 }
 
