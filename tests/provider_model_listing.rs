@@ -6,11 +6,31 @@ use vincents_llm::openai::OpenAIProvider;
 use vincents_llm::provider::LLMProvider;
 use vincents_llm::types::FullModelInfo;
 
-#[derive(World, Debug)]
+#[derive(World)]
 pub struct ModelListingWorld {
     providers: HashMap<String, Box<dyn LLMProvider>>,
     current_models: Vec<FullModelInfo>,
     current_error: Option<String>,
+    /// Kept alive for the duration of a scenario.
+    ///
+    /// Every provider points at this mock. The suite previously used
+    /// `"test-key"` against the real OpenAI and Anthropic endpoints, so it could
+    /// only ever pass on a machine with valid credentials — and a model-listing
+    /// regression suite that needs credentials is not a regression suite.
+    _server: Option<wiremock::MockServer>,
+}
+
+/// Hand-written because the world holds `Box<dyn LLMProvider>`, which is not
+/// `Debug`, and `#[derive(World)]` requires it. Only the parts that help a failed
+/// step are printed.
+impl std::fmt::Debug for ModelListingWorld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelListingWorld")
+            .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .field("current_models", &self.current_models.len())
+            .field("current_error", &self.current_error)
+            .finish()
+    }
 }
 
 impl Default for ModelListingWorld {
@@ -19,38 +39,112 @@ impl Default for ModelListingWorld {
             providers: HashMap::new(),
             current_models: Vec::new(),
             current_error: None,
+            _server: None,
         }
     }
 }
 
+/// A `/models` payload served to every provider.
+///
+/// Deliberately rich: prices, context windows and capability flags are exactly
+/// what these steps assert on, and a payload that omitted them would make the
+/// assertions pass vacuously.
+fn mock_models_body() -> String {
+    serde_json::json!({
+        "data": [
+            {
+                "id": "gpt-4o",
+                "object": "model",
+                "created": 1_700_000_000,
+                "owned_by": "openai",
+                "context_window": 128000,
+                "capabilities": {
+                    "vision": true,
+                    "function_calling": true,
+                    "json_mode": true,
+                    "streaming": true
+                }
+            },
+            {
+                "id": "claude-sonnet-4",
+                "object": "model",
+                "created": 1_700_000_000,
+                "owned_by": "anthropic",
+                "context_window": 200000,
+                "capabilities": {
+                    "vision": true,
+                    "function_calling": true,
+                    "json_mode": false,
+                    "streaming": true
+                }
+            },
+            {
+                "id": "llama3.1:8b",
+                "object": "model",
+                "created": 1_700_000_000,
+                "owned_by": "ollama",
+                "context_window": 131072,
+                "capabilities": {
+                    "vision": false,
+                    "function_calling": true,
+                    "json_mode": true,
+                    "streaming": true
+                }
+            }
+        ]
+    })
+    .to_string()
+}
+
 #[cucumber::given(expr = "I have initialized all providers")]
 async fn initialize_providers(world: &mut ModelListingWorld) {
-    // Initialize Anthropic provider
-    if let Ok(provider) = AnthropicProvider::new("test-key") {
-        world.providers.insert(
-            "anthropic".to_string(),
-            Box::new(provider) as Box<dyn LLMProvider>,
-        );
-    }
+    use vincents_llm::anthropic::AnthropicConfig;
+    use vincents_llm::ollama::OllamaConfig;
+    use vincents_llm::openai::OpenAIConfig;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // Initialize OpenAI provider
-    if let Ok(provider) = OpenAIProvider::new("test-key") {
-        world.providers.insert(
-            "openai".to_string(),
-            Box::new(provider) as Box<dyn LLMProvider>,
-        );
-    }
+    let server = MockServer::start().await;
+    // Each provider reaches its model list at a different path, so the matcher
+    // is a regex rather than one exact path.
+    Mock::given(method("GET"))
+        .and(path_regex(".*/models.*"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(mock_models_body(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let base = server.uri();
 
-    // Initialize Ollama provider
-    if let Ok(provider) = OllamaProvider::with_config(vincents_llm::ollama::OllamaConfig {
-        host: "http://localhost:11434".to_string(),
-        default_model: Some("llama3.1:8b".to_string()),
-    }) {
-        world.providers.insert(
-            "ollama".to_string(),
-            Box::new(provider) as Box<dyn LLMProvider>,
-        );
-    }
+    let provider = AnthropicProvider::with_config(AnthropicConfig {
+        api_key: "test-key".into(),
+        base_url: Some(base.clone()),
+        ..Default::default()
+    })
+    .expect("anthropic provider");
+    world
+        .providers
+        .insert("anthropic".into(), Box::new(provider));
+
+    let provider =
+        OpenAIProvider::with_config(OpenAIConfig {
+            api_key: "test-key".into(),
+            base_url: Some(base.clone()),
+            ..Default::default()
+        })
+        .expect("openai provider");
+    world.providers.insert("openai".into(), Box::new(provider));
+
+    let provider = OllamaProvider::with_config(OllamaConfig {
+        host: base.clone(),
+        default_model: Some("llama3.1:8b".into()),
+    })
+    .expect("ollama provider");
+    world.providers.insert("ollama".into(), Box::new(provider));
+
+    world._server = Some(server);
 }
 
 #[cucumber::when(expr = "I list models from the anthropic provider")]
@@ -123,7 +217,7 @@ async fn verify_model_list(world: &mut ModelListingWorld, step: &Step) {
         let model = world
             .current_models
             .iter()
-            .find(|m| m.id == model_id)
+            .find(|m| m.id == *model_id)
             .unwrap_or_else(|| panic!("Model {} not found", model_id));
 
         assert_eq!(
@@ -182,7 +276,7 @@ async fn verify_model_pricing(world: &mut ModelListingWorld, step: &Step) {
         let model = world
             .current_models
             .iter()
-            .find(|m| m.id == model_id)
+            .find(|m| m.id == *model_id)
             .unwrap_or_else(|| panic!("Model {} not found", model_id));
 
         let pricing = model
@@ -229,8 +323,8 @@ async fn verify_model_fields(world: &mut ModelListingWorld, step: &Step) {
 
     for model in &world.current_models {
         for row in table.rows.iter().skip(1) {
-            let field = &row[0];
-            let requirement = &row[1];
+            let field = row[0].as_str();
+            let requirement = row[1].as_str();
 
             match field {
                 "name" => {
@@ -254,7 +348,7 @@ async fn get_model_details(world: &mut ModelListingWorld, model_id: String) {
     if let Some(provider) = world.providers.get("anthropic") {
         match provider.list_models().await {
             Ok(models) => {
-                if let Some(model) = models.iter().find(|m| m.id == model_id) {
+                if let Some(model) = models.iter().find(|m| m.id == *model_id) {
                     world.current_models = vec![model.clone()];
                     world.current_error = None;
                 } else {
@@ -280,8 +374,8 @@ async fn verify_model_info_fields(world: &mut ModelListingWorld, step: &Step) {
     let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
-        let field = &row[0];
-        let expected_type = &row[1];
+        let field = row[0].as_str();
+        let expected_type = row[1].as_str();
 
         match (field, expected_type) {
             ("id", "string") => {
@@ -320,8 +414,8 @@ async fn verify_capabilities(world: &mut ModelListingWorld, step: &Step) {
     let table = step.table().expect("Step should have a table");
 
     for row in table.rows.iter().skip(1) {
-        let capability = &row[0];
-        let supported = &row[1] == "true";
+        let capability = row[0].as_str();
+        let supported = row[1] == "true";
 
         match capability {
             "vision" => assert_eq!(
@@ -372,7 +466,7 @@ async fn verify_required_fields(world: &mut ModelListingWorld, step: &Step) {
 
     for model in &world.current_models {
         for row in table.rows.iter().skip(1) {
-            let field = &row[0];
+            let field = row[0].as_str();
 
             match field {
                 "id" => assert!(!model.id.is_empty(), "ID is required"),
@@ -501,6 +595,11 @@ async fn verify_ordering(world: &mut ModelListingWorld, first_model: String, sec
 
 #[tokio::main]
 async fn main() {
-    let cli = cucumber::cli::Opts::<cucumber::cli::Empty>::parse();
-    cli.run_and_exit::<ModelListingWorld>().await;
+    // The cucumber 0.20 entry point, as its own documentation shows it: the
+    // builder carries the type inference the old
+    // `Opts::<Empty>::parse()` one-liner no longer supports.
+    ModelListingWorld::cucumber()
+        .with_cli(cucumber::cli::Opts::<_, _, _, cucumber::cli::Empty>::parsed())
+        .run_and_exit("tests/features")
+        .await;
 }

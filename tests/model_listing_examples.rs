@@ -1,4 +1,9 @@
-//! Model Listing Usage Examples
+//! Model Listing usage examples, as runnable tests.
+//!
+//! This lived under `examples/`, which cargo compiles as a binary needing a
+//! `main`. It is a `#[cfg(test)]` module, so it belongs here: it is documentation
+//! that is executed, not a program someone runs with `cargo run` (running it
+//! would hit the real provider APIs with a placeholder key).
 //!
 //! This module demonstrates how to use the model listing functionality
 //! across different LLM providers.
