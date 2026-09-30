@@ -78,6 +78,8 @@ fn text_vision(tools: bool, ctx: u32, max_output: u32) -> ModelCapabilities {
         output_modalities: vec!["text".into()],
         strengths: vec![],
         source: CapabilitySource::Descriptor,
+        // Every flag above is a dated catalog claim, so none of them is unknown.
+        unknown: Default::default(),
     }
 }
 
@@ -117,6 +119,7 @@ fn catalog_entries() -> Vec<Descriptor> {
             streaming: true,
             json_mode: true,
             caching: false,
+            unknown: Default::default(),
             max_tokens: 8_192,
             context_window: 8_192,
             input_modalities: vec!["text".into()],
@@ -136,6 +139,7 @@ fn catalog_entries() -> Vec<Descriptor> {
             streaming: true,
             json_mode: true,
             caching: false,
+            unknown: Default::default(),
             max_tokens: 4_096,
             context_window: 128_000,
             input_modalities: vec!["text".into(), "image".into()],
@@ -155,6 +159,7 @@ fn catalog_entries() -> Vec<Descriptor> {
             streaming: true,
             json_mode: true,
             caching: false,
+            unknown: Default::default(),
             max_tokens: 4_096,
             context_window: 4_096,
             input_modalities: vec!["text".into()],

@@ -1897,6 +1897,30 @@ pub struct ModelPricing {
     pub is_free: bool,
 }
 
+/// One capability a model may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    FunctionCalling,
+    Vision,
+    Streaming,
+    JsonMode,
+    Caching,
+}
+
+impl Capability {
+    /// The field on [`ModelCapabilities`] this capability governs.
+    fn flag(self, capabilities: &ModelCapabilities) -> bool {
+        match self {
+            Capability::FunctionCalling => capabilities.function_calling,
+            Capability::Vision => capabilities.vision,
+            Capability::Streaming => capabilities.streaming,
+            Capability::JsonMode => capabilities.json_mode,
+            Capability::Caching => capabilities.caching,
+        }
+    }
+}
+
 /// Model capabilities
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -1905,6 +1929,7 @@ pub struct ModelCapabilities {
     pub streaming: bool,
     pub json_mode: bool,
     pub caching: bool,
+
     #[serde(default)]
     pub max_tokens: u32,
     #[serde(default)]
@@ -1926,6 +1951,20 @@ pub struct ModelCapabilities {
     /// must not act on a guess reads this first.
     #[serde(default)]
     pub source: CapabilitySource,
+
+    /// The capabilities that have **not** been determined.
+    ///
+    /// §40: "It is better to represent `Unknown` than confidently report false
+    /// capability data." The booleans above cannot say that -- `false` reads as
+    /// "this model has no tool support" when the truth is nearly always "we did
+    /// not look". A caller that must not act on a guess checks this first.
+    ///
+    /// One set rather than a tri-state per field: it is additive, so adding it
+    /// did not force thirteen struct literals across four providers to be
+    /// rewritten, and it composes with `source` for the cases where the whole
+    /// set came from one place.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unknown: std::collections::BTreeSet<Capability>,
 }
 
 /// How a capability value was determined.
@@ -1946,6 +1985,55 @@ pub enum CapabilitySource {
     Descriptor,
     /// Stated by the provider in its own response.
     Provider,
+}
+
+impl ModelCapabilities {
+    /// Every capability undetermined.
+    pub fn all_unknown() -> Self {
+        Self {
+            unknown: [
+                Capability::FunctionCalling,
+                Capability::Vision,
+                Capability::Streaming,
+                Capability::JsonMode,
+                Capability::Caching,
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Mark one capability as determined.
+    pub fn with(mut self, capability: Capability, supported: bool) -> Self {
+        self.unknown.remove(&capability);
+        match capability {
+            Capability::FunctionCalling => self.function_calling = supported,
+            Capability::Vision => self.vision = supported,
+            Capability::Streaming => self.streaming = supported,
+            Capability::JsonMode => self.json_mode = supported,
+            Capability::Caching => self.caching = supported,
+        }
+        self
+    }
+
+    /// Whether a capability is known, rather than merely false.
+    pub fn is_known(&self, capability: Capability) -> bool {
+        !self.unknown.contains(&capability)
+    }
+
+    /// A capability's value, or `None` when it was not determined.
+    ///
+    /// This is the accessor a routing decision should use. `self.vision` reads
+    /// as "no vision" when the truth may be "nobody looked".
+    pub fn get(&self, capability: Capability) -> Option<bool> {
+        self.is_known(capability).then(|| capability.flag(self))
+    }
+
+    /// Whether every capability may be relied on.
+    pub fn is_authoritative(&self) -> bool {
+        self.source.is_authoritative() && self.unknown.is_empty()
+    }
 }
 
 impl Default for CapabilitySource {

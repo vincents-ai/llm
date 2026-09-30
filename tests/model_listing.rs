@@ -428,3 +428,124 @@ mod tests {
         assert!(model_opt.is_none(), "Should not find nonexistent model");
     }
 }
+
+// ── §40: capabilities are known or unknown, never guessed ─────────────────
+
+#[tokio::test]
+async fn a_live_listing_reports_unknown_capabilities_rather_than_guessing() {
+    // §40 names this defect exactly: "the current OpenAI provider guesses
+    // tools/vision/context from substrings". The listing establishes that a
+    // model exists. Nothing else follows from the name.
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                // Names the old substring matcher would have "recognised".
+                {"id": "gpt-4o-2024-11-20-vision-preview", "created": 1},
+                {"id": "brand-new-model-released-yesterday", "created": 2},
+                {"id": "some-128k-model", "created": 3}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    // `fetch_models_live` is the listing path itself; `list_models` prefers the
+    // catalog and would not exercise the parse.
+    let models = provider.fetch_models_live().await.expect("listing");
+    // The listing is merged with the catalog, so assert on the three names the
+    // old substring matcher would have "recognised" rather than on a count.
+    let listed: Vec<&vincents_llm::types::FullModelInfo> = models
+        .iter()
+        .filter(|m| {
+            m.id == "gpt-4o-2024-11-20-vision-preview"
+                || m.id == "brand-new-model-released-yesterday"
+                || m.id == "some-128k-model"
+        })
+        .collect();
+    assert_eq!(listed.len(), 3, "a model we know nothing about still exists");
+
+    for model in &listed {
+        let capabilities = &model.capabilities;
+        // Vision, tools and json are *not* determined by a name.
+        assert!(
+            !capabilities.is_known(vincents_llm::types::Capability::Vision),
+            "{}: vision must not be inferred from the name",
+            model.id
+        );
+        assert!(!capabilities.is_known(vincents_llm::types::Capability::FunctionCalling));
+        assert_eq!(
+            capabilities.get(vincents_llm::types::Capability::Vision),
+            None,
+            "{}: `get` must return None, not Some(false), for an unknown",
+            model.id
+        );
+        // And the context window is not `contains("128k")`.
+        assert_eq!(
+            model.context_window, 0,
+            "{}: a digit run in the name is not a context window",
+            model.id
+        );
+    }
+
+    let unknown_model = models
+        .iter()
+        .find(|m| m.id == "brand-new-model-released-yesterday")
+        .expect("present");
+    assert!(
+        unknown_model.available,
+        "existence is what the listing establishes"
+    );
+}
+
+#[tokio::test]
+async fn capabilities_from_the_versioned_catalog_are_authoritative() {
+    // The other end of §40: a maintained catalog *is* a known descriptor, so its
+    // values are usable for a routing decision.
+    let catalog = vincents_llm::pricing::catalog();
+    let gpt4o = catalog
+        .get("gpt-4o")
+        .expect("gpt-4o is in the catalog");
+    assert_eq!(
+        gpt4o.capabilities.source,
+        vincents_llm::types::CapabilitySource::Descriptor
+    );
+    assert!(
+        gpt4o.capabilities.is_authoritative(),
+        "a catalog entry with no unknown capabilities is authoritative"
+    );
+    assert_eq!(
+        gpt4o.capabilities.get(vincents_llm::types::Capability::Vision),
+        Some(true)
+    );
+    assert_eq!(
+        gpt4o.capabilities.get(vincents_llm::types::Capability::Caching),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_capability_does_not_make_the_set_authoritative() {
+    let capabilities = vincents_llm::types::ModelCapabilities::all_unknown()
+        .with(vincents_llm::types::Capability::Streaming, true);
+    assert!(capabilities.streaming, "the flag is still set");
+    assert!(capabilities.is_known(vincents_llm::types::Capability::Streaming));
+    assert!(!capabilities.is_known(vincents_llm::types::Capability::Vision));
+    assert!(
+        !capabilities.is_authoritative(),
+        "one undetermined capability makes the set unusable for routing"
+    );
+}

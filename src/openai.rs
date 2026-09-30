@@ -337,7 +337,14 @@ impl OpenAIProvider {
     }
 
     /// Fetch models from the live OpenAI API.
-    async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
+    /// The live `/models` listing, parsed.
+    ///
+    /// `pub` because it is a different question from `list_models`: this is
+    /// "what does the provider say exists right now", with capabilities that
+    /// are `Unknown` rather than inferred. `list_models` prefers the versioned
+    /// catalog and falls back here, which is the right default for a pricing
+    /// decision and the wrong one for checking that a model was released.
+    pub async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
         let mut req = self
             .client
             .get(&format!("{}/models", self.get_base_url()))
@@ -392,28 +399,20 @@ impl OpenAIProvider {
                 continue;
             }
 
-            let id_lower = id.to_lowercase();
-            let has_vision = id_lower.contains("vision") || id_lower.contains("gpt-4o");
-            let has_tools = id_lower.contains("gpt-4")
-                || id_lower.contains("gpt-3.5")
-                || id_lower.contains("o1")
-                || id_lower.contains("o3");
-            let ctx: u32 = if id_lower.contains("128k") || id_lower.contains("gpt-4o") {
-                128000
-            } else {
-                16384
-            };
-            let mut strengths = Vec::new();
-            if id_lower.contains("o1") || id_lower.contains("o3") {
-                strengths.push("reasoning".to_string());
-            }
-            if has_vision {
-                strengths.push("vision".to_string());
-            }
-            let mut input_mods = vec!["text".to_string()];
-            if has_vision {
-                input_mods.push("image".to_string());
-            }
+            // §40: no substring matching. The previous code decided vision,
+            // tools, reasoning and context window from the model's *name* --
+            // `contains("gpt-4o")`, `contains("128k")` -- which reports confident
+            // false capability data for every model released since the list was
+            // written, and for every model that happens to contain a digit run
+            // that looks like a context window.
+            //
+            // What is actually knowable from a `/models` listing: the model
+            // exists, and that is all. Anything else is `Unknown`.
+            // A `/models` listing establishes that a model exists. Streaming is
+            // supported on every OpenAI endpoint, so that one is known; nothing
+            // else is inferred from the name.
+            let capabilities = crate::types::ModelCapabilities::all_unknown()
+                .with(crate::types::Capability::Streaming, true);
 
             let id_clone = id.clone();
             models.push(crate::types::FullModelInfo {
@@ -421,26 +420,17 @@ impl OpenAIProvider {
                 name: id_clone,
                 provider: "openai".to_string(),
                 description: Some("OpenAI model".to_string()),
-                context_window: ctx,
-                max_output_tokens: ctx,
-                capabilities: crate::types::ModelCapabilities {
-                    function_calling: has_tools,
-                    vision: has_vision,
-                    streaming: true,
-                    json_mode: has_tools,
-                    caching: false,
-                    max_tokens: ctx,
-                    context_window: ctx,
-                    input_modalities: input_mods,
-                    output_modalities: vec!["text".to_string()],
-                    strengths,
-                                        source: crate::types::CapabilitySource::Heuristic,
-                    },
+                // A `/models` listing states that a model exists. It does not
+                // state its context window, and guessing one from a digit run
+                // in the name is how a 1M-context model gets 128k.
+                context_window: 0,
+                max_output_tokens: 0,
+                capabilities,
                 pricing: None,
                 created: m["created"].as_u64().unwrap_or(0),
                 available: true,
-                                supported_parameters: Default::default(),
-                });
+                supported_parameters: Default::default(),
+            });
         }
         Ok(models)
     }

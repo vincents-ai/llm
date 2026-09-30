@@ -351,6 +351,7 @@ impl OllamaProvider {
                         output_modalities: vec!["text".to_string()],
                         strengths,
                                             source: crate::types::CapabilitySource::Heuristic,
+                    ..Default::default()
                     },
                     pricing: Some(crate::types::ModelPricing {
                         prompt_tokens: 0.0,
@@ -474,7 +475,8 @@ impl LLMProvider for OllamaProvider {
                     output_modalities: vec!["text".to_string()],
                     strengths: vec![],
                                         source: crate::types::CapabilitySource::Heuristic,
-                    },
+                    ..Default::default()
+                },
                 pricing: Some(crate::types::ModelPricing {
                     prompt_tokens: 0.0,
                     completion_tokens: 0.0,

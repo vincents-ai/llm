@@ -775,6 +775,7 @@ impl LLMProvider for OpenRouterProvider {
                         // The provider stated these in its own response, so they
                         // are the authoritative kind — not a guess.
                         source: crate::types::CapabilitySource::Provider,
+                    ..Default::default()
                     },
                     pricing: Some(ModelPricing {
                         prompt_tokens: prompt_per_1k,
