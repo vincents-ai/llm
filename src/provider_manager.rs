@@ -457,6 +457,7 @@ mod tests {
                 choices: vec![],
                 usage: None,
                 system_fingerprint: None,
+                unknown_fields: Default::default(),
             })
         }
         async fn chat_completion_with_functions(
@@ -472,6 +473,7 @@ mod tests {
                 choices: vec![],
                 usage: None,
                 system_fingerprint: None,
+                unknown_fields: Default::default(),
             })
         }
         async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
@@ -597,6 +599,7 @@ mod tests {
                             choices: vec![],
                             usage: None,
                             system_fingerprint: None,
+                            unknown_fields: Default::default(),
                         })
                     } else {
                         Err(LLMError::ProviderError {

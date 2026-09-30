@@ -600,6 +600,7 @@ impl LLMProvider for OllamaProvider {
             choices,
             usage,
             system_fingerprint: None,
+            unknown_fields: Default::default(),
         })
     }
 
@@ -894,6 +895,7 @@ impl LLMProvider for OllamaProvider {
             }],
             usage,
             system_fingerprint: None,
+            unknown_fields: Default::default(),
         })
     }
 

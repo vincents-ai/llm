@@ -780,6 +780,16 @@ impl LLMProvider for OpenRouterProvider {
                 .get("system_fingerprint")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            // Everything else the provider sent, kept. A new field reaching
+            // this build is visible to the caller even though this crate cannot
+            // interpret it.
+            unknown_fields: ChatCompletionResponse::collect_unknown(
+                &json,
+                &[
+                "id", "object", "created", "model", "choices", "usage",
+                "system_fingerprint", "error",
+            ],
+            ),
         })
     }
 

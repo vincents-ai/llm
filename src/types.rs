@@ -1341,6 +1341,53 @@ pub struct ChatCompletionResponse {
     /// System fingerprint for response
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
+
+    /// Fields this build does not recognise, kept verbatim.
+    ///
+    /// §52. `#[serde(flatten)]` is what makes this work: a new provider field
+    /// lands here instead of being dropped, so a feature that reaches a build
+    /// which predates it is still *visible* to the caller even though this crate
+    /// cannot interpret it. Silently discarding it is how a routing decision
+    /// ends up made on data the caller believes it received.
+    ///
+    /// Empty on every response this crate produces, and absent from the
+    /// serialized form when empty, so it does not perturb a golden body.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub unknown_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ChatCompletionResponse {
+    /// Whether an unrecognised field named `key` was present.
+    pub fn has_unknown(&self, key: &str) -> bool {
+        self.unknown_fields.contains_key(key)
+    }
+
+    /// An unrecognised field by name.
+    pub fn unknown(&self, key: &str) -> Option<&serde_json::Value> {
+        self.unknown_fields.get(key)
+    }
+
+    /// Collect every key of `body` that this build does not model.
+    ///
+    /// The `known` list is the point: a provider adding a field is not a
+    /// licence to claim *every* unrecognised key, because `id`, `model` and the
+    /// rest are mapped by hand elsewhere and would otherwise appear twice --
+    /// once interpreted and once raw.
+    pub fn collect_unknown(
+        body: &serde_json::Value,
+        known: &[&str],
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut unknown = serde_json::Map::new();
+        let Some(object) = body.as_object() else {
+            return unknown;
+        };
+        for (key, value) in object {
+            if !known.contains(&key.as_str()) && !value.is_null() {
+                unknown.insert(key.clone(), value.clone());
+            }
+        }
+        unknown
+    }
 }
 
 /// A completion choice

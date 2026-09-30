@@ -390,6 +390,7 @@ impl GeminiProvider {
             choices,
             usage,
             system_fingerprint: None,
+            unknown_fields: Default::default(),
         }
     }
 

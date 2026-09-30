@@ -251,3 +251,168 @@ async fn a_truncated_stream_is_a_stream_error_not_a_parse_error() {
         "§50 forbids downgrading a protocol error to a parse failure"
     );
 }
+// ── §52: unknown response fields survive ───────────────────────────────────
+
+#[tokio::test]
+async fn an_unrecognised_response_field_is_kept_rather_than_dropped() {
+    // The provider sends a field this build predates. A caller routing on it
+    // today should still be able to see it.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-u", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "service_tier": "scale",
+            "a_field_from_the_future": {"nested": [1, 2, 3]}
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    assert!(response.has_unknown("a_field_from_the_future"));
+    assert_eq!(
+        response.unknown("a_field_from_the_future").expect("kept"),
+        &json!({"nested": [1, 2, 3]}),
+        "the value survives whole, not stringified"
+    );
+    assert_eq!(response.unknown("service_tier"), Some(&json!("scale")));
+}
+
+#[tokio::test]
+async fn already_modelled_fields_do_not_also_appear_as_unknown() {
+    // Otherwise every caller has two copies of `id` and `model`, and it is not
+    // obvious which one is authoritative.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    for modelled in ["id", "object", "created", "model", "choices", "usage"] {
+        assert!(
+            !response.has_unknown(modelled),
+            "'{modelled}' is modelled and must not also appear as unknown: {:?}",
+            response.unknown_fields
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_normal_response_has_no_unknown_fields_and_serializes_unchanged() {
+    // The field must not perturb a golden body: `skip_serializing_if` keeps it
+    // off the wire when empty.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    assert!(response.unknown_fields.is_empty(), "{:?}", response.unknown_fields);
+    let serialized = serde_json::to_value(&response).expect("serializes");
+    assert!(serialized.get("unknown_fields").is_none(), "{serialized}");
+}
+
+#[tokio::test]
+async fn unknown_fields_round_trip_through_a_stored_session() {
+    // A session persisted and reloaded must not lose them -- that is the whole
+    // point of keeping them.
+    let body = json!({
+        "id": "chatcmpl-rt", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "future_field": 42
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    let stored = serde_json::to_string(&response).expect("stores");
+    let reloaded: vincents_llm::types::ChatCompletionResponse =
+        serde_json::from_str(&stored).expect("reloads");
+    assert_eq!(reloaded.unknown("future_field"), Some(&json!(42)));
+}

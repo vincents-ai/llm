@@ -489,6 +489,7 @@ fn anthropic_image(url: &str, model: &str) -> Result<Value> {
             choices: vec![choice],
             usage,
             system_fingerprint: None,
+            unknown_fields: Default::default(),
         })
     }
 
