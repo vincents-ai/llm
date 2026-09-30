@@ -377,46 +377,37 @@ impl LLMProvider for OpenAIProvider {
     ) -> Result<ChatCompletionResponse> {
         let start = std::time::Instant::now();
 
+        // Resolve the model exactly as the streaming and tool-calling paths do.
+        // This path previously sent `request.model` raw, so a request that
+        // relied on `default_model` sent `"model": ""` and the failure surfaced
+        // as an opaque provider error rather than a clear one.
+        let model = if request.model.is_empty() {
+            self.config.default_model.clone().ok_or_else(|| {
+                LLMError::ConfigurationError {
+                    message: "No model configured for OpenAIProvider — set default_model in \
+                              OpenAIConfig or pass a model in the request"
+                        .to_string(),
+                    field: Some("default_model".to_string()),
+                }
+            })?
+        } else {
+            request.model.clone()
+        };
+
         let messages: Vec<Value> = request
             .messages
             .iter()
             .map(Self::serialize_message)
             .collect();
 
-        let mut body = json!({
-            "model": request.model,
-            "messages": messages,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-            if let Some(n) = request.n {
-                obj.insert("n".to_string(), json!(n));
-            }
-            if !request.stop.is_empty() {
-                obj.insert("stop".to_string(), json!(request.stop));
-            }
-            if let Some(presence) = request.presence_penalty {
-                obj.insert("presence_penalty".to_string(), json!(presence));
-            }
-            if let Some(freq) = request.frequency_penalty {
-                obj.insert("frequency_penalty".to_string(), json!(freq));
-            }
-            if !request.logit_bias.is_empty() {
-                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
-            }
-            for (key, value) in &request.extra_params {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
+        // One builder for every path; see `crate::wire`.
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: false,
+            tools: None,
+        })?;
 
         let json = self.send_chat_request(body).await?;
 
@@ -454,23 +445,17 @@ impl LLMProvider for OpenAIProvider {
             .map(Self::serialize_message)
             .collect();
 
-        let mut body = json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-        }
+        // The same builder the non-streaming path uses. Before this the
+        // streaming body kept only `max_tokens`, `temperature` and `top_p`, so
+        // `stop`, `n`, the penalties, `logit_bias` and `user` were silently
+        // dropped on a streaming request.
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: true,
+            tools: None,
+        })?;
 
         let response = self
             .client
@@ -610,41 +595,27 @@ impl LLMProvider for OpenAIProvider {
             })
             .collect();
 
-        let mut body = json!({
-            "model": request.model,
-            "messages": messages,
-            "tools": tools,
-        });
+        let model = if request.model.is_empty() {
+            self.config.default_model.clone().ok_or_else(|| {
+                LLMError::ConfigurationError {
+                    message: "No model configured for OpenAIProvider — set default_model in \
+                              OpenAIConfig or pass a model in the request"
+                        .to_string(),
+                    field: Some("default_model".to_string()),
+                }
+            })?
+        } else {
+            request.model.clone()
+        };
 
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-            if let Some(n) = request.n {
-                obj.insert("n".to_string(), json!(n));
-            }
-            if !request.stop.is_empty() {
-                obj.insert("stop".to_string(), json!(request.stop));
-            }
-            if let Some(presence) = request.presence_penalty {
-                obj.insert("presence_penalty".to_string(), json!(presence));
-            }
-            if let Some(freq) = request.frequency_penalty {
-                obj.insert("frequency_penalty".to_string(), json!(freq));
-            }
-            if !request.logit_bias.is_empty() {
-                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
-            }
-            for (key, value) in &request.extra_params {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
+        // The same builder again, now with the serialized tools.
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: false,
+            tools: Some(&tools),
+        })?;
 
         let json = self.send_chat_request(body).await?;
 

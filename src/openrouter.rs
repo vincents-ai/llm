@@ -325,37 +325,15 @@ impl LLMProvider for OpenRouterProvider {
         let messages: Vec<serde_json::Value> =
             request.messages.iter().map(ChatMessage::to_openai_json).collect();
 
-        let mut body = json!({
-            "model": model,
-            "messages": messages,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-            if let Some(n) = request.n {
-                obj.insert("n".to_string(), json!(n));
-            }
-            if !request.stop.is_empty() {
-                obj.insert("stop".to_string(), json!(request.stop));
-            }
-            if let Some(presence) = request.presence_penalty {
-                obj.insert("presence_penalty".to_string(), json!(presence));
-            }
-            if let Some(freq) = request.frequency_penalty {
-                obj.insert("frequency_penalty".to_string(), json!(freq));
-            }
-            if !request.logit_bias.is_empty() {
-                obj.insert("logit_bias".to_string(), json!(request.logit_bias));
-            }
-        }
+        // One builder, shared with the OpenAI provider: the dialect is the
+        // same, so the two cannot drift into sending different fields.
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: false,
+            tools: None,
+        })?;
 
         let mut request_builder = self
             .client
@@ -477,23 +455,16 @@ impl LLMProvider for OpenRouterProvider {
         let messages: Vec<serde_json::Value> =
             request.messages.iter().map(ChatMessage::to_openai_json).collect();
 
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), serde_json::json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), serde_json::json!(top_p));
-            }
-        }
+        // The last hand-written field list. OpenRouter's streaming path had the
+        // same three-field truncation as OpenAI's; routing it through the shared
+        // builder is the end of the class, not just of this instance.
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: true,
+            tools: None,
+        })?;
 
         let mut request_builder = self
             .client
@@ -720,26 +691,13 @@ impl LLMProvider for OpenRouterProvider {
             })
             .collect();
 
-        let mut body = json!({
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-        });
-
-        if let Some(obj) = body.as_object_mut() {
-            if let Some(max_tokens) = request.max_tokens {
-                obj.insert("max_tokens".to_string(), json!(max_tokens));
-            }
-            if let Some(temp) = request.temperature {
-                obj.insert("temperature".to_string(), json!(temp));
-            }
-            if let Some(top_p) = request.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-            for (key, value) in &request.extra_params {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: false,
+            tools: Some(&tools),
+        })?;
 
         let mut request_builder = self
             .client

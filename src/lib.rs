@@ -25,6 +25,7 @@ pub mod ollama;
 #[cfg(feature = "openrouter")]
 pub mod openrouter;
 pub mod pricing;
+pub mod wire;
 
 // Re-exports
 pub use config::{LLMConfig, ProviderConfig};
