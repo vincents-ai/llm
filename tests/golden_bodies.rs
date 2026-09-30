@@ -37,6 +37,7 @@ fn body(request: &ChatCompletionRequest) -> Value {
         stream: false,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
     .expect("valid request")
 }
@@ -141,6 +142,7 @@ fn a_collision_errors_rather_than_overriding_in_either_direction() {
         stream: false,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
     .expect_err("collision");
     assert!(
@@ -209,6 +211,7 @@ fn golden_developer_role() {
         stream: false,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
     .expect("valid");
     assert_eq!(
@@ -240,6 +243,7 @@ fn golden_image_content() {
         stream: false,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
     .expect("valid");
     assert_eq!(
@@ -352,6 +356,7 @@ fn golden_function_tool_and_choice() {
         request: &request,
         stream: false,
         tools: Some(&tool_wire),
+        default_service_tier: None,
         provider_params: None,
     })
     .expect("valid");
@@ -416,6 +421,7 @@ fn golden_extra_param_without_and_with_collision() {
         stream: false,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
     .expect_err("collision with a required field");
     assert!(matches!(
@@ -501,6 +507,7 @@ fn golden_openrouter_extensions_serialize_as_expected() {
         stream: false,
         tools: None,
         provider_params: Some(&params),
+        default_service_tier: None,
     })
     .expect("valid");
 

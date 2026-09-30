@@ -12,6 +12,8 @@
 //!
 //! `wiremock` is already a dev-dependency.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 use vincents_llm::provider::LLMProvider;
 use vincents_llm::types::{ChatCompletionRequest, ChatMessage};
@@ -40,6 +42,27 @@ async fn captured_headers(server: &MockServer) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+async fn body_of(server: &MockServer) -> Value {
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(requests.len(), 1, "expected exactly one request");
+    serde_json::from_slice(&requests[0].body).expect("the body must be JSON")
+}
+
+/// A provider pointed at a mock, with the config adjusted per test.
+fn openai_with(
+    base_url: &str,
+    configure: impl FnOnce(&mut vincents_llm::openai::OpenAIConfig),
+) -> vincents_llm::openai::OpenAIProvider {
+    let mut config = vincents_llm::openai::OpenAIConfig {
+        api_key: "test-key".into(),
+        base_url: Some(base_url.to_string()),
+        default_model: Some("gpt-4o".into()),
+        ..Default::default()
+    };
+    configure(&mut config);
+    vincents_llm::openai::OpenAIProvider::with_config(config).expect("provider")
 }
 
 fn openai(server: &MockServer) -> vincents_llm::openai::OpenAIProvider {
@@ -912,4 +935,185 @@ async fn interleaved_parallel_tool_calls_assemble_by_index_not_arrival_order() {
     let usage = usage.expect("usage must be captured");
     assert_eq!(usage.total_tokens, 48);
     assert!(finished, "the provider's terminator must be reported");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §19 configuration, §23 log probabilities
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn organization_and_project_reach_every_call_path() {
+    // §19: an organization that works for `/models` and is dropped on chat is
+    // half configured. Both headers, on every path.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+
+    let provider = openai_with(&server.uri(), |c| {
+        c.organization_id = Some("org-1".into());
+        c.project_id = Some("proj-1".into());
+    });
+    provider
+        .chat_completion(text_request())
+        .await
+        .expect("request succeeds");
+
+    let requests = server.received_requests().await.expect("recorded");
+    let headers: BTreeMap<String, String> = requests[0]
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str().to_lowercase(), v.as_str().to_string()))
+        .collect();
+    assert_eq!(headers.get("openai-organization").map(String::as_str), Some("org-1"));
+    assert_eq!(headers.get("openai-project").map(String::as_str), Some("proj-1"));
+}
+
+#[tokio::test]
+async fn a_default_service_tier_applies_only_when_the_request_omits_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+
+    let provider = openai_with(&server.uri(), |c| {
+        c.default_service_tier = Some(vincents_llm::types::ServiceTier("flex".into()));
+    });
+    provider
+        .chat_completion(text_request())
+        .await
+        .expect("ok");
+    let body = body_of(&server).await;
+    assert_eq!(body["service_tier"], "flex", "the deployment default applies");
+
+    // An explicit choice beats the deployment default rather than colliding
+    // with it.
+    let server2 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server2)
+        .await;
+    let provider = openai_with(&server2.uri(), |c| {
+        c.default_service_tier = Some(vincents_llm::types::ServiceTier("flex".into()));
+    });
+    let mut request = text_request();
+    request.service_tier = Some(vincents_llm::types::ServiceTier("scale".into()));
+    provider.chat_completion(request).await.expect("ok");
+    let body2 = body_of(&server2).await;
+    assert_eq!(body2["service_tier"], "scale", "the request's own choice wins");
+}
+
+#[tokio::test]
+async fn log_probabilities_are_parsed_rather_than_discarded() {
+    // §23 names this exactly: the response builders set `logprobs` to `None`
+    // and threw away data the provider had already sent.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop",
+                "logprobs": {"content": [
+                    {"token": "Hello", "logprob": -0.25, "bytes": [72, 101, 108, 108, 111],
+                     "top_logprobs": [
+                        {"token": "Hello", "logprob": -0.25, "bytes": [72]},
+                        {"token": "Hi",    "logprob": -3.10, "bytes": [72, 105]}
+                     ]}
+                ]}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut request = text_request();
+    request.logprobs = Some(true);
+    request.top_logprobs = Some(2);
+
+    let response = openai_with(&server.uri(), |_| {})
+        .chat_completion(request)
+        .await
+        .expect("ok");
+
+    let logprobs = response.choices[0]
+        .logprobs
+        .as_ref()
+        .expect("logprobs must not be discarded");
+    assert_eq!(logprobs.content.len(), 1);
+    let token = &logprobs.content[0];
+    assert_eq!(token.token, "Hello");
+    assert_eq!(token.logprob, -0.25);
+    assert_eq!(token.bytes.as_deref(), Some(&[72u8, 101, 108, 108, 111][..]));
+    assert_eq!(token.top_logprobs.len(), 2);
+    assert_eq!(token.top_logprobs[1].token, "Hi");
+    assert_eq!(token.top_logprobs[1].bytes.as_deref(), Some(&[72u8, 105][..]));
+}
+
+#[tokio::test]
+async fn duplicate_alternative_tokens_are_both_kept() {
+    // The old type was `Vec<HashMap<String, f64>>` keyed by token text, so two
+    // alternatives with the same token collapsed into one and the count -- and
+    // therefore the probability mass -- was silently wrong. §23 says fix the
+    // type when it cannot express the data.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "  "},
+                "finish_reason": "stop",
+                "logprobs": {"content": [{
+                    "token": "  ", "logprob": -0.5,
+                    "top_logprobs": [
+                        {"token": " ", "logprob": -0.5},
+                        {"token": " ", "logprob": -1.5}
+                    ]
+                }]}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut request = text_request();
+    request.logprobs = Some(true);
+    let response = openai_with(&server.uri(), |_| {})
+        .chat_completion(request)
+        .await
+        .expect("ok");
+
+    let alternatives = &response.choices[0]
+        .logprobs
+        .as_ref()
+        .expect("logprobs")
+        .content[0]
+        .top_logprobs;
+    assert_eq!(alternatives.len(), 2, "both survive: {alternatives:?}");
+    assert_eq!(alternatives[0].logprob, -0.5);
+    assert_eq!(alternatives[1].logprob, -1.5);
+}
+
+#[tokio::test]
+async fn absent_logprobs_stay_absent() {
+    // The normal case when the request did not ask for them. `None`, not an
+    // empty object that reads as "the model was certain".
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+    let response = openai_with(&server.uri(), |_| {})
+        .chat_completion(text_request())
+        .await
+        .expect("ok");
+    assert!(response.choices[0].logprobs.is_none());
 }

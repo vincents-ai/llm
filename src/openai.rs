@@ -19,9 +19,25 @@ use crate::RateLimitStatus;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIConfig {
     pub api_key: String,
+    /// Sent on every call, not just `/models`. §19: an organization that only
+    /// works for discovery is half configured.
     pub organization_id: Option<String>,
+    /// Sent as `OpenAI-Project`, on every call path.
+    pub project_id: Option<String>,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
+    /// Per-request timeout in seconds.
+    ///
+    /// A streaming request can legitimately run for minutes, so this is a
+    /// default the client applies rather than a hard cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The service tier to request when a request does not name one.
+    ///
+    /// A deployment-level default, not a per-request field: the tier is a
+    /// billing and latency decision an application makes once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_service_tier: Option<ServiceTier>,
 }
 
 impl Default for OpenAIConfig {
@@ -29,8 +45,11 @@ impl Default for OpenAIConfig {
         Self {
             api_key: String::new(),
             organization_id: None,
+            project_id: None,
             base_url: Some("https://api.openai.com/v1".to_string()),
             default_model: None,
+            timeout_secs: None,
+            default_service_tier: None,
         }
     }
 }
@@ -101,6 +120,11 @@ impl OpenAIProvider {
             request: &request,
             stream: true,
             tools: None,
+            default_service_tier: self
+                .config
+                .default_service_tier
+                .as_ref()
+                .map(|tier| tier.as_str()),
             provider_params: None,
         })?;
 
@@ -108,9 +132,7 @@ impl OpenAIProvider {
             .client
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
-        if let Some(org) = &self.config.organization_id {
-            request_builder = request_builder.header("OpenAI-Organization", org);
-        }
+        request_builder = self.apply_account_headers(request_builder);
         let response = request_builder
             .json(&body)
             .send()
@@ -140,6 +162,23 @@ impl OpenAIProvider {
         }
 
         Ok((response, model))
+    }
+
+    /// The organization and project headers, on every call path.
+    ///
+    /// One helper rather than four inline blocks. §19's whole point: an
+    /// organization that works for `/models` and is silently dropped on chat is
+    /// half configured, and the way that happens is by applying the header
+    /// where someone remembered to.
+    fn apply_account_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut builder = builder;
+        if let Some(organization) = &self.config.organization_id {
+            builder = builder.header("OpenAI-Organization", organization);
+        }
+        if let Some(project) = &self.config.project_id {
+            builder = builder.header("OpenAI-Project", project);
+        }
+        builder
     }
 
     fn get_base_url(&self) -> &str {
@@ -207,13 +246,7 @@ impl OpenAIProvider {
             .post(&format!("{}/chat/completions", self.get_base_url()))
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json");
-        // §19: the organization header must reach *every* OpenAI call, not only
-        // the model listing. It was applied to `/models` and silently dropped on
-        // every chat request, so a configured organization only worked for
-        // discovery.
-        if let Some(org) = &self.config.organization_id {
-            request = request.header("OpenAI-Organization", org);
-        }
+        request = self.apply_account_headers(request);
         let response = request
             .json(&body)
             .send()
@@ -268,7 +301,11 @@ impl OpenAIProvider {
                     index: idx as u32,
                     message,
                     finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-                    logprobs: None,
+                    // §23. This was hardcoded to `None`, which discarded the
+                    // token probabilities, the alternatives and the bytes the
+                    // provider had already sent -- on a field whose whole reason
+                    // for existing is to carry them.
+                    logprobs: LogProbResponse::from_openai_json(&choice["logprobs"]),
                 }
             })
             .collect();
@@ -309,9 +346,7 @@ impl OpenAIProvider {
         if !self.config.api_key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
-        if let Some(org) = &self.config.organization_id {
-            req = req.header("OpenAI-Organization", org);
-        }
+        req = self.apply_account_headers(req);
 
         let resp = req
             .send()
@@ -503,6 +538,13 @@ impl LLMProvider for OpenAIProvider {
             request: &request,
             stream: false,
             tools: None,
+            // The deployment default, applied by the builder only when the
+            // request does not name a tier of its own.
+            default_service_tier: self
+                .config
+                .default_service_tier
+                .as_ref()
+                .map(|tier| tier.as_str()),
             provider_params: None,
         })?;
 

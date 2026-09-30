@@ -57,6 +57,15 @@ pub struct ChatRequestParts<'a> {
     pub stream: bool,
     /// Serialized tool definitions, when the request is request-bearing.
     pub tools: Option<&'a [Value]>,
+    /// A service tier to use when the request does not name one.
+    ///
+    /// A deployment default rather than a per-request field: the tier is a
+    /// billing and latency decision an application makes once, and letting
+    /// every call site choose it is how a default quietly stops being one.
+    /// A tier the request *does* name wins -- an explicit choice beats a
+    /// deployment default.
+    pub default_service_tier: Option<&'a str>,
+
     /// Provider-specific fields that have no portable equivalent.
     ///
     /// Merged after everything else, under the same collision rule as
@@ -253,6 +262,14 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
     // complain that `extra_params` shadows a field the caller never got to use.
     validate_request(request, &parts)?;
 
+    // 3b. The deployment's default service tier, applied only when the request
+    // did not choose one.
+    if let Some(tier) = parts.default_service_tier {
+        if !body.contains_key("service_tier") {
+            body.insert("service_tier".into(), json!(tier));
+        }
+    }
+
     // 4. Provider-specific extensions, then the raw escape hatch. Both are
     //    collision-checked, and both come last.
     if let Some(extensions) = parts.provider_params {
@@ -308,6 +325,7 @@ mod tests {
             request,
             stream,
             tools: None,
+            default_service_tier: None,
             provider_params: None,
         })
     }
@@ -370,7 +388,8 @@ mod tests {
             stream: false,
             tools: None,
             provider_params: None,
-})
+    default_service_tier: None,
+        })
         .expect("body");
         assert_eq!(body["model"], "gpt-4o");
     }
@@ -445,7 +464,8 @@ mod tests {
             stream: false,
             tools: None,
             provider_params: None,
-})
+    default_service_tier: None,
+        })
         .unwrap();
         assert!(without.get("tools").is_none());
 
@@ -457,7 +477,8 @@ mod tests {
             stream: false,
             tools: Some(&tools),
             provider_params: None,
-})
+    default_service_tier: None,
+        })
         .unwrap();
         assert_eq!(with["tools"].as_array().unwrap().len(), 1);
     }
@@ -473,7 +494,8 @@ mod tests {
             stream: false,
             tools: Some(&tools),
             provider_params: None,
-})
+    default_service_tier: None,
+        })
         .unwrap();
         assert!(body.get("tools").is_none());
     }
@@ -498,6 +520,7 @@ mod modern_parameter_tests {
             request,
             stream,
             tools: None,
+            default_service_tier: None,
             provider_params: None,
         })
     }

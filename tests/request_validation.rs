@@ -29,6 +29,7 @@ fn build(request: &ChatCompletionRequest, stream: bool) -> Result<Value, LLMErro
         stream,
         tools: None,
         provider_params: None,
+        default_service_tier: None,
     })
 }
 

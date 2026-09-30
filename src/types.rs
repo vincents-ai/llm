@@ -1414,13 +1414,81 @@ pub struct LogProbResponse {
     pub content: Vec<TokenLogProb>,
 }
 
-/// Token log probability
+/// One alternative token for a position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopLogProb {
+    pub token: String,
+    pub logprob: f64,
+    /// The token's UTF-8 bytes, where the provider sends them.
+    ///
+    /// Not derivable from `token` in general: a provider may return bytes that
+    /// do not round-trip to the same string (a byte sequence that is not valid
+    /// UTF-8, or a token with leading whitespace the display form normalizes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// A token and its log probability, with the alternatives at that position.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogProb {
     pub token: String,
     pub logprob: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+    /// The alternatives, in the provider's order.
+    ///
+    /// Was `Vec<HashMap<String, f64>>`, which was wrong twice over: two
+    /// alternatives with the same token text collapsed into one entry, so the
+    /// count -- and therefore the probability mass -- was silently wrong, and
+    /// there was nowhere to put `bytes`. A list of records expresses what the
+    /// provider actually sent, including duplicates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub top_logprobs: Vec<HashMap<String, f64>>,
+    pub top_logprobs: Vec<TopLogProb>,
+}
+
+impl LogProbResponse {
+    /// Parse a `choices[].logprobs` object.
+    ///
+    /// `None` when the provider sent no logprobs -- which is the normal case
+    /// unless the request asked for them, and is not an error.
+    pub fn from_openai_json(value: &serde_json::Value) -> Option<Self> {
+        let content = value.get("content")?.as_array()?;
+        Some(Self {
+            content: content.iter().filter_map(parse_token).collect(),
+        })
+    }
+}
+
+fn parse_token(entry: &serde_json::Value) -> Option<TokenLogProb> {
+    Some(TokenLogProb {
+        token: entry.get("token")?.as_str()?.to_string(),
+        logprob: entry.get("logprob").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        bytes: parse_bytes(entry.get("bytes")),
+        top_logprobs: entry
+            .get("top_logprobs")
+            .and_then(|v| v.as_array())
+            .map(|alternatives| alternatives.iter().filter_map(parse_top).collect())
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_top(entry: &serde_json::Value) -> Option<TopLogProb> {
+    Some(TopLogProb {
+        token: entry.get("token")?.as_str()?.to_string(),
+        logprob: entry.get("logprob").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        bytes: parse_bytes(entry.get("bytes")),
+    })
+}
+
+/// A provider's `bytes` array, which is a list of small integers.
+fn parse_bytes(value: Option<&serde_json::Value>) -> Option<Vec<u8>> {
+    Some(
+        value?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_u64().map(|n| n as u8))
+            .collect(),
+    )
 }
 
 /// Streaming chunk response

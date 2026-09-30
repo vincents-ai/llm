@@ -516,6 +516,7 @@ impl OpenRouterProvider {
             request: &request,
             stream: true,
             tools: None,
+            default_service_tier: None,
             provider_params: params.as_ref(),
         })?;
 
@@ -828,6 +829,7 @@ impl LLMProvider for OpenRouterProvider {
             request: &request,
             stream: false,
             tools: tool_wire.as_deref(),
+            default_service_tier: None,
             provider_params: params.as_ref(),
         })?;
 
@@ -955,7 +957,8 @@ impl LLMProvider for OpenRouterProvider {
                     index: idx as u32,
                     message,
                     finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-                    logprobs: None,
+                    // §23. Same as OpenAI: the data was sent and thrown away.
+                    logprobs: LogProbResponse::from_openai_json(&choice["logprobs"]),
                 }
             })
             .collect();
