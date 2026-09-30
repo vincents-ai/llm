@@ -31,6 +31,27 @@ pub struct OpenAIResponsesConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Application attribution, for providers that ask for it (§34).
+    ///
+    /// Absent on OpenAI, required by OpenRouter's terms. It lives here rather
+    /// than in a request field because it names the *application* -- a value
+    /// every call site could set differently is the opposite of what attribution
+    /// is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Ask for routing metadata (§36).
+    #[serde(default)]
+    pub metadata: bool,
+    /// A stable id for this conversation (§37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// A per-request trace id (§37).
+    ///
+    /// An identifier only. Nothing here derives one from message content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 impl Default for OpenAIResponsesConfig {
@@ -41,6 +62,11 @@ impl Default for OpenAIResponsesConfig {
             project_id: None,
             base_url: None,
             default_model: None,
+            referrer: None,
+            title: None,
+            metadata: false,
+            session_id: None,
+            trace: None,
         }
     }
 }
@@ -87,6 +113,25 @@ impl OpenAIResponsesProvider {
         }
         if let Some(project) = &self.config.project_id {
             builder = builder.header("OpenAI-Project", project);
+        }
+        // Attribution and observability, applied identically on create, stream,
+        // retrieve, cancel and delete. A header that only appears on the main
+        // path is the same class of defect as an organization header that only
+        // appears on `/models`.
+        if let Some(referrer) = &self.config.referrer {
+            builder = builder.header("HTTP-Referer", referrer);
+        }
+        if let Some(title) = &self.config.title {
+            builder = builder.header("X-OpenRouter-Title", title);
+        }
+        if self.config.metadata {
+            builder = builder.header("X-OpenRouter-Metadata", "enabled");
+        }
+        if let Some(session_id) = &self.config.session_id {
+            builder = builder.header("X-Session-Id", session_id);
+        }
+        if let Some(trace) = &self.config.trace {
+            builder = builder.header("X-OpenRouter-Trace", trace);
         }
         builder
     }

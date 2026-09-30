@@ -8,6 +8,8 @@
 //! Provider-specific extensions must be opt-in -- they go through
 //! `provider_params`, and a portable request must not carry any.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 use vincents_llm::responses::*;
 use vincents_llm::responses_provider::{
@@ -315,4 +317,75 @@ async fn validation_is_identical_on_the_second_provider() {
     req.conversation = Some(ConversationRef::Id("conv".into()));
     assert!(provider(&server.uri()).create(req).await.is_err());
     assert!(server.received_requests().await.expect("recorded").is_empty());
+}
+// ── §34/§36/§37 on the Responses endpoint ──────────────────────────────────
+
+#[tokio::test]
+async fn attribution_and_trace_headers_reach_the_responses_endpoint() {
+    // A Responses request is a request. Attribution and observability that only
+    // appear on `/chat/completions` are the same defect as an organization
+    // header that only appears on `/models`.
+    let server = server().await;
+    let mut config = config(&server.uri());
+    config.referrer = Some("https://example.com".into());
+    config.title = Some("Example App".into());
+    config.metadata = true;
+    config.session_id = Some("traj-1".into());
+    config.trace = Some("span-2".into());
+    OpenAIResponsesProvider::with_config(config)
+        .expect("provider")
+        .create(request())
+        .await
+        .expect("request succeeds");
+
+    let requests = server.received_requests().await.expect("recorded");
+    let headers: BTreeMap<String, String> = requests[0]
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str().to_lowercase(), v.as_str().to_string()))
+        .collect();
+    assert_eq!(
+        headers.get("http-referer").map(String::as_str),
+        Some("https://example.com")
+    );
+    assert_eq!(
+        headers.get("x-openrouter-title").map(String::as_str),
+        Some("Example App")
+    );
+    assert_eq!(
+        headers.get("x-openrouter-metadata").map(String::as_str),
+        Some("enabled")
+    );
+    assert_eq!(headers.get("x-session-id").map(String::as_str), Some("traj-1"));
+    assert_eq!(
+        headers.get("x-openrouter-trace").map(String::as_str),
+        Some("span-2")
+    );
+    // And authentication, unchanged.
+    assert_eq!(
+        headers.get("authorization").map(String::as_str),
+        Some("Bearer or-key")
+    );
+}
+
+#[tokio::test]
+async fn a_responses_request_without_attribution_sends_none() {
+    // The headers are opt-in. Sending an empty `HTTP-Referer` is not
+    // "withheld" as far as a provider's terms are concerned.
+    let server = server().await;
+    OpenAIResponsesProvider::with_config(config(&server.uri()))
+        .expect("provider")
+        .create(request())
+        .await
+        .expect("ok");
+
+    let requests = server.received_requests().await.expect("recorded");
+    for (name, _) in requests[0].headers.iter() {
+        let name = name.as_str().to_lowercase();
+        assert!(
+            !["http-referer", "x-openrouter-title", "x-session-id", "x-openrouter-trace"]
+                .contains(&name.as_str()),
+            "{name} should be absent when unconfigured"
+        );
+    }
 }
