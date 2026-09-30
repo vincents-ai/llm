@@ -180,6 +180,60 @@ impl OpenRouterExtensions {
     }
 }
 
+/// Combine the caller's function tools with the provider's server tools.
+///
+/// One list, because they are one `tools` array on the wire. Kept separate in the
+/// type system because a `FunctionDefinition` is something the caller executes
+/// and an `OpenRouterServerTool` is something OpenRouter executes -- and a
+/// policy check that cannot tell them apart cannot gate either.
+fn build_tool_list(
+    request: &ChatCompletionRequest,
+    server_tools: &[OpenRouterServerTool],
+) -> Option<Vec<serde_json::Value>> {
+    let mut tools: Vec<serde_json::Value> = request
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| serde_json::to_value(tool).unwrap_or(serde_json::Value::Null))
+                .collect()
+        })
+        .unwrap_or_default();
+    if server_tools.is_empty() {
+        return if tools.is_empty() { None } else { Some(tools) };
+    }
+    tools.extend(
+        server_tools
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap_or(serde_json::Value::Null)),
+    );
+    Some(tools)
+}
+
+/// The reserved body key OpenRouter's routing metadata is recorded under.
+///
+/// The shared response builder knows nothing about OpenRouter's headers, so the
+/// metadata rides along in the body under this key and reaches the caller as an
+/// ordinary response field.
+pub const OPENROUTER_METADATA_KEY: &str = "_openrouter";
+
+/// Routing metadata returned by OpenRouter (§36).
+///
+/// Empty when the request did not ask for it, or when the provider omitted it.
+/// Both are normal; `generation_id` being absent is not an error.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutingMetadata {
+    /// The generation id, and the handle OpenRouter's own logs are indexed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    /// The upstream provider that actually served the request, when routed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
 /// A tool OpenRouter operates rather than the caller.
 ///
 /// §38: these execute remotely, which is a different authority and lifecycle
@@ -187,6 +241,13 @@ impl OpenRouterExtensions {
 /// policy check can see which is which.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenRouterServerTool {
+    /// The `openrouter:`-prefixed name, e.g. `openrouter:web_search`.
+    ///
+    /// Serialized as `type`, because that is the field the wire format uses to
+    /// say "this executes on OpenRouter's infrastructure". A bare `name` would
+    /// produce `{"name": "openrouter:web_search"}`, which is not the shape and
+    /// loses the one signal that distinguishes it from a local function.
+    #[serde(rename = "type")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -195,6 +256,49 @@ pub struct OpenRouterServerTool {
     /// Whether OpenRouter should stop this tool once the model stops calling it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_when_not_called: Option<bool>,
+}
+
+impl OpenRouterServerTool {
+    /// A provider-operated tool by its `openrouter:` name.
+    ///
+    /// The `openrouter:` prefix is required. Without it the name is
+    /// indistinguishable from a local function at the wire level, and a policy
+    /// check that only looks at names can no longer tell that execution happens
+    /// on OpenRouter's infrastructure.
+    pub fn new(name: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        if !name.starts_with("openrouter:") {
+            return Err(LLMError::ConfigurationError {
+                message: format!(
+                    "a server tool must be named 'openrouter:<tool>', got '{name}'"
+                ),
+                field: Some("name".to_string()),
+            });
+        }
+        Ok(Self {
+            name,
+            description: None,
+            input_schema: None,
+            stop_when_not_called: None,
+        })
+    }
+
+    /// Named constructors for the tools §38 lists.
+    pub fn web_search() -> Self {
+        Self::new("openrouter:web_search").expect("a known tool name")
+    }
+    pub fn datetime() -> Self {
+        Self::new("openrouter:datetime").expect("a known tool name")
+    }
+    pub fn image_generation() -> Self {
+        Self::new("openrouter:image_generation").expect("a known tool name")
+    }
+    pub fn web_fetch() -> Self {
+        Self::new("openrouter:web_fetch").expect("a known tool name")
+    }
+    pub fn apply_patch() -> Self {
+        Self::new("openrouter:apply_patch").expect("a known tool name")
+    }
 }
 
 /// OpenRouter Provider Configuration
@@ -218,11 +322,32 @@ pub struct OpenRouterConfig {
     /// parameter would mean every call site could set it differently, which is
     /// the opposite of what attribution is for (§34).
     pub title: Option<String>,
-    /// Ask for routing metadata on Responses, via `X-OpenRouter-Metadata`.
+    /// Ask for routing metadata, via `X-OpenRouter-Metadata` (§36).
     ///
-    /// Opt-in because the response grows; the data is worth having for the
-    /// model router and for diagnosing a fallback (§36).
+    /// Opt-in because the response grows. The data is worth having for the model
+    /// router, for fallback diagnosis and for benchmark reproducibility.
     pub metadata: bool,
+
+    /// A stable id for this conversation, sent as `X-Session-Id` (§37).
+    ///
+    /// Correlates every request from one agentic-loop session at the provider.
+    /// This is what makes a fallback diagnosable afterwards: individual
+    /// generation ids only mean something grouped under a session.
+    pub session_id: Option<String>,
+
+    /// A per-request trace id, sent as `X-OpenRouter-Trace` (§37).
+    ///
+    /// An identifier only. §37 is explicit that trace metadata must not carry
+    /// secrets or prompts, so nothing in this crate derives one from message
+    /// content.
+    pub trace: Option<String>,
+
+    /// An opaque user identifier, sent as `X-OpenRouter-User` (§37).
+    ///
+    /// Caller-supplied and opaque. This crate deliberately does not derive an
+    /// identifier from a prompt, because that is how user data ends up in
+    /// provider logs.
+    pub user_id: Option<String>,
     pub default_route: Option<String>,
     pub default_model: Option<String>,
     pub jwt_token: Option<String>,
@@ -236,6 +361,9 @@ impl Default for OpenRouterConfig {
             referrer: None,
             title: None,
             metadata: false,
+            session_id: None,
+            trace: None,
+            user_id: None,
             default_route: None,
             default_model: None,
             jwt_token: None,
@@ -247,6 +375,14 @@ impl Default for OpenRouterConfig {
 #[derive(Debug)]
 pub struct OpenRouterProvider {
     config: OpenRouterConfig,
+    /// Provider-operated tools, sent alongside the caller's own function tools.
+    ///
+    /// Configured on the provider rather than per request: which remote
+    /// capabilities an application grants is a deployment decision, and a
+    /// per-request field would let one call silently acquire a capability the
+    /// application did not intend to expose.
+    pub server_tools: Vec<OpenRouterServerTool>,
+
     /// Provider-wide routing and privacy policy, merged into every request body.
     ///
     /// Configured here rather than per request on purpose: a deployment that
@@ -267,6 +403,7 @@ impl OpenRouterProvider {
                 ..Default::default()
             },
             extensions: OpenRouterExtensions::default(),
+            server_tools: Vec::new(),
             client,
         })
     }
@@ -283,6 +420,7 @@ impl OpenRouterProvider {
         Ok(Self {
             config,
             extensions: OpenRouterExtensions::default(),
+            server_tools: Vec::new(),
             client: reqwest::Client::new(),
         })
     }
@@ -327,6 +465,16 @@ impl OpenRouterProvider {
         }
         if self.config.metadata {
             builder = builder.header("X-OpenRouter-Metadata", "enabled");
+        }
+        // §37. Identifiers only -- never a prompt or a secret.
+        if let Some(session_id) = &self.config.session_id {
+            builder = builder.header("X-Session-Id", session_id);
+        }
+        if let Some(trace) = &self.config.trace {
+            builder = builder.header("X-OpenRouter-Trace", trace);
+        }
+        if let Some(user_id) = &self.config.user_id {
+            builder = builder.header("X-OpenRouter-User", user_id);
         }
         if let Some(route) = &self.config.default_route {
             tracing::debug!(
@@ -667,12 +815,19 @@ impl LLMProvider for OpenRouterProvider {
         // same, so the two cannot drift into sending different fields.
         let extensions = self.extensions_for(&request);
         let params = extensions.as_ref().map(|e| e.to_params());
+        // §38. Provider-operated tools ride in the same `tools` array as local
+        // functions -- that is the wire shape -- but they are a distinct type, so
+        // a policy check can see which calls execute on OpenRouter's
+        // infrastructure and which the caller runs. Folding them into
+        // `FunctionDefinition` with a reserved name would make that invisible.
+        let tool_wire = build_tool_list(&request, &self.server_tools);
+
         let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
             model: &model,
             messages: &messages,
             request: &request,
             stream: false,
-            tools: None,
+            tools: tool_wire.as_deref(),
             provider_params: params.as_ref(),
         })?;
 
@@ -710,15 +865,43 @@ impl LLMProvider for OpenRouterProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let body = response.text().await.ok();
-            return Err(LLMError::HttpError {
-                message: format!("OpenRouter API error: {}", status),
-                status_code: Some(status.as_u16()),
+            return Err(LLMError::from_provider_response(
+                "OpenRouter",
+                status,
                 body,
-            });
+                request_id,
+            ));
         }
 
-        let json: serde_json::Value =
+        // §36. Asking for metadata and *keeping* it are different things, and
+        // only the second is useful: the generation id is the handle
+        // OpenRouter's own logs are indexed by. Read before the body is
+        // consumed, since the headers go with it.
+        let routing = RoutingMetadata {
+            generation_id: response
+                .headers()
+                .get("x-openrouter-generation-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            provider: response
+                .headers()
+                .get("x-openrouter-provider")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            request_id: response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+        };
+
+        let mut json: serde_json::Value =
             response
                 .json()
                 .await
@@ -726,6 +909,16 @@ impl LLMProvider for OpenRouterProvider {
                     message: e.to_string(),
                     context: Some("Failed to parse OpenRouter response".to_string()),
                 })?;
+
+        // Recorded in the body so it survives the shared builder, which knows
+        // nothing about OpenRouter's headers, and reaches the caller as an
+        // ordinary response field.
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                OPENROUTER_METADATA_KEY.to_string(),
+                serde_json::to_value(&routing).unwrap_or(serde_json::Value::Null),
+            );
+        }
 
         let id = json["id"].as_str().unwrap_or("unknown").to_string();
         let created = json["created"].as_u64().unwrap_or(0);

@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use vincents_llm::openrouter::{
     DataCollectionPolicy, OpenRouterConfig, OpenRouterExtensions, OpenRouterMaxPrice,
     OpenRouterProvider, OpenRouterProviderRouting, OpenRouterServerTool, OpenRouterSort,
+    RoutingMetadata,
 };
 use vincents_llm::provider::LLMProvider;
 use vincents_llm::types::{ChatCompletionRequest, ChatMessage};
@@ -300,13 +301,16 @@ fn a_server_tool_is_not_shaped_like_a_local_function() {
         stop_when_not_called: Some(true),
     };
     let wire = serde_json::to_value(&tool).expect("serializes");
-    assert_eq!(wire["name"], "openrouter:web_search");
+    // Serialized as `type`: that field is what says the call happens remotely.
+    assert_eq!(wire["type"], "openrouter:web_search");
     assert_eq!(wire["stop_when_not_called"], true);
     assert!(
         wire.get("function").is_none(),
         "a server tool must not masquerade as a local function: {wire}"
     );
-    assert!(wire.get("type").is_none(), "{wire}");
+    // The discriminator is the `type` tag, which is why it must be present and
+    // why it must carry the `openrouter:` prefix.
+    assert_eq!(wire["type"], "openrouter:web_search", "{wire}");
 }
 
 // ── supported_parameters (§39) ─────────────────────────────────────────────
@@ -516,4 +520,133 @@ async fn routing_still_reaches_the_body_on_the_streaming_path() {
     assert_eq!(body["provider"]["zdr"], true);
     assert_eq!(body["provider"]["data_collection"], "deny");
     assert_eq!(body["top_k"], 20);
+}
+
+// ── §36, §37, §38 ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn trace_identity_headers_are_sent_and_carry_no_prompt_data() {
+    let server = server().await;
+    provider(&server, |c| {
+        c.session_id = Some("traj-abc".into());
+        c.trace = Some("span-1".into());
+        c.user_id = Some("tenant-7".into());
+    })
+    .chat_completion(request())
+    .await
+    .expect("request succeeds");
+
+    let headers = headers_of(&server).await;
+    assert_eq!(header(&headers, "x-session-id").as_deref(), Some("traj-abc"));
+    assert_eq!(header(&headers, "x-openrouter-trace").as_deref(), Some("span-1"));
+    assert_eq!(header(&headers, "x-openrouter-user").as_deref(), Some("tenant-7"));
+}
+
+fn header(headers: &std::collections::BTreeMap<String, String>, name: &str) -> Option<String> {
+    headers.get(name).cloned()
+}
+
+#[tokio::test]
+async fn returned_routing_metadata_is_captured_not_merely_requested() {
+    // §36. Sending `X-OpenRouter-Metadata: enabled` and discarding the answer
+    // satisfies the letter of the request and none of the purpose: the whole
+    // point is fallback diagnosis, which needs the generation id *after* the
+    // fact.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(completion_body("ok"))
+                .insert_header("x-openrouter-generation-id", "gen-123")
+                .insert_header("x-openrouter-provider", "Together")
+                .insert_header("x-request-id", "req-9"),
+        )
+        .mount(&server)
+        .await;
+
+    let response = provider(&server, |c| c.metadata = true)
+        .chat_completion(request())
+        .await
+        .expect("request succeeds");
+
+    let metadata: RoutingMetadata =
+        serde_json::from_value(response.unknown(vincents_llm::openrouter::OPENROUTER_METADATA_KEY)
+            .cloned()
+            .expect("routing metadata is present"))
+        .expect("decodes");
+    assert_eq!(metadata.generation_id.as_deref(), Some("gen-123"));
+    assert_eq!(metadata.provider.as_deref(), Some("Together"));
+    assert_eq!(metadata.request_id.as_deref(), Some("req-9"));
+}
+
+#[tokio::test]
+async fn absent_routing_metadata_is_recorded_as_absent() {
+    let server = server().await;
+    let response = provider(&server, |_| {})
+        .chat_completion(request())
+        .await
+        .expect("request succeeds");
+    let value = response
+        .unknown(vincents_llm::openrouter::OPENROUTER_METADATA_KEY)
+        .cloned()
+        .expect("the key is present even when nothing was returned");
+    assert_eq!(value, json!({}), "empty, not fabricated");
+}
+
+#[tokio::test]
+async fn server_tools_reach_the_wire_in_the_tools_array() {
+    // §38. This type previously existed and nothing ever sent it.
+    let server = server().await;
+    let mut p = provider(&server, |_| {});
+    p.server_tools = vec![
+        OpenRouterServerTool::web_search(),
+        OpenRouterServerTool::web_fetch(),
+    ];
+    p.chat_completion(request()).await.expect("request succeeds");
+
+    let body = body_of(&server).await;
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 2);
+    // The wire shape is a bare `{"type": "openrouter:<tool>"}` -- *not* a
+    // function object. That is the distinction a policy check reads.
+    assert_eq!(tools[0]["type"], "openrouter:web_search");
+    assert_eq!(tools[1]["type"], "openrouter:web_fetch");
+    assert!(tools[0]["function"].is_null(), "not a local function: {tools:?}");
+}
+
+#[tokio::test]
+async fn server_tools_and_local_function_tools_share_one_array() {
+    let server = server().await;
+    let mut p = provider(&server, |_| {});
+    p.server_tools = vec![OpenRouterServerTool::web_search()];
+    let mut request = request();
+    request.tools = Some(vec![vincents_llm::types::ToolDefinition::Function(
+        vincents_llm::types::FunctionDefinitionWire {
+            name: "get_weather".into(),
+            description: None,
+            parameters: None,
+            strict: None,
+        },
+    )]);
+    p.chat_completion(request).await.expect("request succeeds");
+
+    let body = body_of(&server).await;
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 2, "both kinds, one array");
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["function"]["name"], "get_weather");
+    assert_eq!(tools[1]["type"], "openrouter:web_search");
+}
+
+#[test]
+fn a_server_tool_must_be_named_as_one() {
+    // Without the prefix the name is indistinguishable from a local function,
+    // and the only thing distinguishing them on the wire is the type tag.
+    let error = OpenRouterServerTool::new("web_search").expect_err("must be prefixed");
+    assert!(
+        matches!(error, vincents_llm::error::LLMError::ConfigurationError { .. }),
+        "{error:?}"
+    );
+    assert!(OpenRouterServerTool::new("openrouter:web_search").is_ok());
 }
