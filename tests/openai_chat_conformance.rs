@@ -64,6 +64,81 @@ fn openrouter(server: &MockServer) -> vincents_llm::openrouter::OpenRouterProvid
     .expect("provider constructs")
 }
 
+/// The brief's exact interleaved sequence: two calls announced together, then
+/// four argument fragments arriving out of order across the two calls.
+fn tool_call_stream_events() -> String {
+    sse(&[
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                    {"index": 0, "id": "call_a", "type": "function", "function": {"name": "get_weather", "arguments": ""}},
+                    {"index": 1, "id": "call_b", "type": "function", "function": {"name": "get_time", "arguments": ""}}
+                ]}, "finish_reason": null}]
+            })
+            .to_string(),
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": "{\"city\":"}}
+                ]}, "finish_reason": null}]
+            })
+            .to_string(),
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 1, "function": {"arguments": "{\"tz\":"}}
+                ]}, "finish_reason": null}]
+            })
+            .to_string(),
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": "\"Oslo\"}"}}
+                ]}, "finish_reason": null}]
+            })
+            .to_string(),
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 1, "function": {"arguments": "\"UTC\"}"}}
+                ]}, "finish_reason": null}]
+            })
+            .to_string(),
+            &json!({
+                "id": "chatcmpl-tools", "object": "chat.completion.chunk",
+                "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 18, "total_tokens": 48}
+            })
+            .to_string(),
+    ])
+    }
+
+/// A tool-bearing request, so the provider-side tool-call path is exercised.
+fn request_with_tools() -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: "gpt-4o-2024-08-06".into(),
+        messages: vec![ChatMessage::user("weather in Oslo and the time?")],
+        tools: Some(vec![vincents_llm::types::ToolDefinition::Function(
+            vincents_llm::types::FunctionDefinitionWire {
+                name: "get_weather".to_string(),
+                description: Some("weather for a city".to_string()),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}}
+                })),
+                strict: None,
+            },
+        )]),
+        ..Default::default()
+    }
+}
+
 fn text_request() -> ChatCompletionRequest {
     ChatCompletionRequest {
         model: "gpt-4o".into(),
@@ -321,56 +396,7 @@ async fn p0_openai_stream_preserves_provider_metadata_and_finish_reason() {
 #[tokio::test]
 async fn tool_call_deltas_are_preserved_across_interleaved_parallel_calls() {
     let server = MockServer::start().await;
-    let events = sse(&[
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
-                {"index": 0, "id": "call_a", "type": "function", "function": {"name": "get_weather", "arguments": ""}},
-                {"index": 1, "id": "call_b", "type": "function", "function": {"name": "get_time", "arguments": ""}}
-            ]}, "finish_reason": null}]
-        })
-        .to_string(),
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "function": {"arguments": "{\"city\":"}}
-            ]}, "finish_reason": null}]
-        })
-        .to_string(),
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 1, "function": {"arguments": "{\"tz\":"}}
-            ]}, "finish_reason": null}]
-        })
-        .to_string(),
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "function": {"arguments": "\"Oslo\"}"}}
-            ]}, "finish_reason": null}]
-        })
-        .to_string(),
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 1, "function": {"arguments": "\"UTC\"}"}}
-            ]}, "finish_reason": null}]
-        })
-        .to_string(),
-        &json!({
-            "id": "chatcmpl-tools", "object": "chat.completion.chunk",
-            "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-            "usage": {"prompt_tokens": 30, "completion_tokens": 18, "total_tokens": 48}
-        })
-        .to_string(),
-    ]);
+    let events = tool_call_stream_events();
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(events, "text/event-stream"))
@@ -406,10 +432,73 @@ async fn tool_call_deltas_are_preserved_across_interleaved_parallel_calls() {
         joined.contains("get_weather") && joined.contains("get_time"),
         "both tool names must appear: {joined}"
     );
-    assert!(
-        joined.contains("Oslo") && joined.contains("UTC"),
-        "argument fragments must appear: {joined}"
-    );
+
+    // Every chunk carries the *response* id. Using the tool call's id here
+    // would make each chunk in a parallel-call response look like a different
+    // conversation.
+    for chunk in &raw {
+        assert_eq!(
+            chunk["id"], "chatcmpl-tools",
+            "a tool call's id must not be used as the response id: {chunk}"
+        );
+    }
+}
+
+/// The legacy `Chunk` shape has no index, so argument fragments cannot be
+/// placed: emitting them in arrival order would yield valid JSON for the wrong
+/// call. This asserts they are retrievable through the structured API, which is
+/// the only place they can be correct.
+#[tokio::test]
+async fn tool_call_argument_fragments_come_from_the_structured_api() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            tool_call_stream_events(),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    use futures::StreamExt;
+    let mut stream = openai(&server)
+        .chat_completion_stream_events(request_with_tools())
+        .await
+        .expect("stream opens");
+
+    let mut assembler = vincents_llm::types::ToolCallAssembler::new();
+    while let Some(event) = stream.next().await {
+        let event = event.expect("event");
+        match event {
+            vincents_llm::types::ChatStreamEvent::ToolCallStart {
+                tool_index,
+                id,
+                name,
+                ..
+            } => assembler.start(tool_index, id, name),
+            vincents_llm::types::ChatStreamEvent::ToolCallArgumentsDelta {
+                tool_index, delta, ..
+            } => assembler.push_arguments(tool_index, &delta),
+            // Identity, usage and the finish reason are expected and uninteresting
+            // here; this test is about fragment assembly.
+            _ => {}
+        }
+    }
+
+    let calls = assembler.finish();
+    let by_name: std::collections::BTreeMap<&str, &str> = calls
+        .iter()
+        .map(|c| {
+            (
+                c.name.as_deref().unwrap_or_default(),
+                c.arguments.as_str(),
+            )
+        })
+        .collect();
+
+    assert_eq!(by_name.get("get_weather").copied(), Some(r#"{"city":"Oslo"}"#));
+    assert_eq!(by_name.get("get_time").copied(), Some(r#"{"tz":"UTC"}"#));
+    assert_eq!(calls.len(), 2, "exactly two calls, not merged");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

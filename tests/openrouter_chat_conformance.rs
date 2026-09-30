@@ -351,3 +351,169 @@ async fn supported_parameters_are_preserved_verbatim() {
     assert!(models[0].capabilities.function_calling);
     assert_eq!(models[0].capabilities.source.is_authoritative(), true);
 }
+
+// ── Streaming (§40, and the defects that were only ever on this path) ──────
+
+fn sse(events: &[Value]) -> String {
+    events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn tool_stream() -> String {
+    sse(&[
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"tool_calls": [
+                   {"index": 0, "id": "call_a", "function": {"name": "get_weather", "arguments": ""}},
+                   {"index": 1, "id": "call_b", "function": {"name": "get_time", "arguments": ""}}
+               ]}, "finish_reason": null}]}),
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"tool_calls": [
+                   {"index": 0, "function": {"arguments": "{\"city\":"}}]}, "finish_reason": null}]}),
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"tool_calls": [
+                   {"index": 1, "function": {"arguments": "{\"tz\":"}}]}, "finish_reason": null}]}),
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"tool_calls": [
+                   {"index": 0, "function": {"arguments": "\"Oslo\"}"}}]}, "finish_reason": null}]}),
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"tool_calls": [
+                   {"index": 1, "function": {"arguments": "\"UTC\"}"}}]}, "finish_reason": null}]}),
+        json!({"id": "gen-tools", "created": 1_700_000_500, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+               "usage": {"prompt_tokens": 30, "completion_tokens": 18, "total_tokens": 48}}),
+    ]) + "data: [DONE]\n\n"
+}
+
+async fn streaming_server(body: String) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn openrouter_streams_tool_calls_rather_than_silently_skipping_them() {
+    // This is the defect that was unique to OpenRouter: the parser read
+    // `delta.content` and skipped everything else, so a tool-call response
+    // produced *no* events and one synthetic `stop`. An agentic loop saw a clean
+    // completion with no tools.
+    let server = streaming_server(tool_stream()).await;
+    use futures::StreamExt;
+    let mut stream = provider(&server, |_| {})
+        .chat_completion_stream_events(request())
+        .await
+        .expect("stream opens");
+
+    let mut assembler = vincents_llm::types::ToolCallAssembler::new();
+    let mut ids = Vec::new();
+    let mut finish = Vec::new();
+    let mut usage = None;
+    while let Some(event) = stream.next().await {
+        use vincents_llm::types::ChatStreamEvent as E;
+        match event.expect("event") {
+            E::ResponseStart { id, .. } => ids.push(id),
+            E::ToolCallStart { tool_index, id, name, .. } => {
+                assembler.start(tool_index, id, name)
+            }
+            E::ToolCallArgumentsDelta { tool_index, delta, .. } => {
+                assembler.push_arguments(tool_index, &delta)
+            }
+            E::ChoiceFinished { reason, .. } => finish.push(reason),
+            E::Usage(u) => usage = Some(u),
+            _ => {}
+        }
+    }
+
+    assert_eq!(ids, vec!["gen-tools".to_string()], "the provider's id, not a fabricated one");
+    assert_eq!(finish, vec![Some("tool_calls".to_string())], "no synthetic trailing stop");
+
+    let calls = assembler.finish();
+    let by_name: BTreeMap<&str, &str> = calls
+        .iter()
+        .map(|c| (c.name.as_deref().unwrap_or_default(), c.arguments.as_str()))
+        .collect();
+    assert_eq!(by_name["get_weather"], r#"{"city":"Oslo"}"#);
+    assert_eq!(by_name["get_time"], r#"{"tz":"UTC"}"#);
+
+    let usage = usage.expect("usage must be the provider's, not invented");
+    assert_eq!(usage.total_tokens, 48);
+}
+
+#[tokio::test]
+async fn a_truncated_openrouter_stream_is_an_error_not_a_completion() {
+    // The read loop was `while let Ok(Some(bytes))`, so a dropped connection
+    // ended the stream and then fell through to the normal-terminator branch.
+    // A partial answer was indistinguishable from a complete one — the single
+    // most dangerous behaviour in this file.
+    let truncated = sse(&[
+        json!({"id": "gen-cut", "created": 1_700_000_000, "model": "openai/gpt-4o",
+               "choices": [{"index": 0, "delta": {"content": "The answer is"}, "finish_reason": null}]}),
+    ]);
+    let server = streaming_server(truncated).await;
+    use futures::StreamExt;
+    let mut stream = provider(&server, |_| {})
+        .chat_completion_stream_events(request())
+        .await
+        .expect("stream opens");
+
+    let mut text = String::new();
+    let mut error = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(vincents_llm::types::ChatStreamEvent::TextDelta { text: t, .. }) => text.push_str(&t),
+            Ok(_) => {}
+            Err(e) => {
+                error = Some(e);
+                break;
+            }
+        }
+    }
+
+    assert_eq!(text, "The answer is", "the partial text is still delivered");
+    let error = error.expect("a truncated stream must surface an error, not a clean finish");
+    assert!(
+        matches!(error, vincents_llm::error::LLMError::StreamInterrupted { .. }),
+        "{error:?}"
+    );
+    assert!(
+        error.is_retryable(),
+        "the request was understood; the failure was in transit"
+    );
+}
+
+#[tokio::test]
+async fn routing_still_reaches_the_body_on_the_streaming_path() {
+    // The streaming path built its body separately, which is exactly how the
+    // two paths drifted. The extensions must not vanish when `stream: true`.
+    let server = streaming_server(format!("data: [DONE]\n\n")).await;
+    use futures::StreamExt;
+    let mut p = provider(&server, |_| {});
+    p.set_extensions(OpenRouterExtensions {
+        provider: Some(OpenRouterProviderRouting {
+            zdr: Some(true),
+            data_collection: Some(DataCollectionPolicy::Deny),
+            ..Default::default()
+        }),
+        top_k: Some(20),
+        ..Default::default()
+    });
+    let mut stream = p
+        .chat_completion_stream_events(request())
+        .await
+        .expect("stream opens");
+    while let Some(event) = stream.next().await {
+        event.expect("event");
+    }
+
+    let body = body_of(&server).await;
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["provider"]["zdr"], true);
+    assert_eq!(body["provider"]["data_collection"], "deny");
+    assert_eq!(body["top_k"], 20);
+}

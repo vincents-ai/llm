@@ -26,6 +26,7 @@ pub mod ollama;
 pub mod openrouter;
 pub mod pricing;
 pub mod wire;
+pub mod stream;
 
 // Re-exports
 pub use config::{LLMConfig, ProviderConfig};

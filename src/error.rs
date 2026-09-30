@@ -164,6 +164,13 @@ pub enum LLMError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<f64>,
     },
+
+    /// The response stream ended before the provider's own terminator.
+    ///
+    /// Distinct from a generic stream error because the caller's response is
+    /// *partial*: acting on it as if complete is the failure mode.
+    #[error("Stream interrupted: {message}")]
+    StreamInterrupted { message: String },
 }
 
 impl LLMError {
@@ -182,6 +189,9 @@ impl LLMError {
             LLMError::ConfigurationError { .. } => false,
             LLMError::SerializationError { .. } => false,
             LLMError::StreamingError { .. } => true,
+            // A truncated response is worth retrying: the request was
+            // understood, and the failure was in transit.
+            LLMError::StreamInterrupted { .. } => true,
             LLMError::ContentFilterError { .. } => false,
             LLMError::UnsupportedError { .. } => false,
             LLMError::ContextLengthExceeded { .. } => false,
@@ -234,6 +244,13 @@ impl LLMError {
                 format!(
                     "Model '{}' is not available. Please try a different model.",
                     model
+                )
+            }
+            LLMError::StreamInterrupted { message } => {
+                format!(
+                    "The response stream ended early ({}). The answer is incomplete — \
+                     do not treat it as a finished response.",
+                    message
                 )
             }
             LLMError::InvalidRequestError { message, .. } => {

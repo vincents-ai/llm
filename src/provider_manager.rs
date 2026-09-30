@@ -380,6 +380,9 @@ fn is_breaker_failure(error: &LLMError) -> bool {
         LLMError::TimeoutError { .. } => true,
         LLMError::ProviderError { .. } => true,
         LLMError::StreamingError { .. } => true,
+        // A truncated response is a transport failure, not a bad request, and
+        // is worth failing over.
+        LLMError::StreamInterrupted { .. } => true,
         // Non-retryable — don't penalise
         LLMError::AuthenticationError { .. } => false,
         LLMError::ModelNotAvailable { .. } => false,

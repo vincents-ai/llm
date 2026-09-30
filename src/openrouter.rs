@@ -4,7 +4,6 @@
 //! provider ranking/selection, referrer support, and JWT authentication.
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::pin::Pin;
@@ -338,6 +337,81 @@ impl OpenRouterProvider {
             builder = builder.header("OpenRouter-Router", route);
         }
         builder
+    }
+
+    /// Send a streaming request and hand back the raw response.
+    ///
+    /// One sender, two stream shapes. They previously had separate bodies,
+    /// which is how they drifted: a fix to one was not a fix to the other.
+    async fn send_streaming_request(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<(reqwest::Response, String)> {
+        let model = if request.model.is_empty() {
+            self.get_default_model()?.to_string()
+        } else {
+            request.model.clone()
+        };
+
+        // The same serializer the non-streaming path uses, so the two cannot
+        // drift.
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(ChatMessage::to_openai_json).collect();
+
+        // The last hand-written field list. OpenRouter's streaming path had the
+        // same three-field truncation as OpenAI's; routing it through the shared
+        // builder is the end of the class, not just of this instance.
+        let extensions = self.extensions_for(&request);
+        let params = extensions.as_ref().map(|e| e.to_params());
+        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
+            model: &model,
+            messages: &messages,
+            request: &request,
+            stream: true,
+            tools: None,
+            provider_params: params.as_ref(),
+        })?;
+
+        let mut request_builder = self
+            .client
+            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .header("Content-Type", "application/json");
+
+        if let Some(jwt) = &self.config.jwt_token {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
+        } else {
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        request_builder = self.apply_common_headers(request_builder);
+
+        if let Some(route) = &self.config.default_route {
+            request_builder = request_builder.header("OpenRouter-Router", route);
+        }
+
+        let response =
+            request_builder
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| LLMError::HttpError {
+                    message: e.to_string(),
+                    status_code: None,
+                    body: None,
+                })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.ok();
+            return Err(LLMError::HttpError {
+                message: format!("OpenRouter API error: {}", status),
+                status_code: Some(status.as_u16()),
+                body,
+            });
+        }
+
+        Ok((response, model))
     }
 
     fn get_base_url(&self) -> &str {
@@ -706,153 +780,23 @@ impl LLMProvider for OpenRouterProvider {
         })
     }
 
+    async fn chat_completion_stream_events(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<ChatStreamEvent>> + Send>>> {
+        let (response, _) = self.send_streaming_request(request).await?;
+        Ok(crate::stream::parse_sse_stream(response))
+    }
+
+    /// Legacy text-only streaming, adapted from the same parsed events.
     async fn chat_completion_stream(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<Chunk>> + Send>>> {
-        let model = if request.model.is_empty() {
-            self.get_default_model()?.to_string()
-        } else {
-            request.model.clone()
-        };
-
-        // The same serializer the non-streaming path uses, so the two cannot
-        // drift.
-        let messages: Vec<serde_json::Value> =
-            request.messages.iter().map(ChatMessage::to_openai_json).collect();
-
-        // The last hand-written field list. OpenRouter's streaming path had the
-        // same three-field truncation as OpenAI's; routing it through the shared
-        // builder is the end of the class, not just of this instance.
-        let extensions = self.extensions_for(&request);
-        let params = extensions.as_ref().map(|e| e.to_params());
-        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
-            model: &model,
-            messages: &messages,
-            request: &request,
-            stream: true,
-            tools: None,
-            provider_params: params.as_ref(),
-        })?;
-
-        let mut request_builder = self
-            .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
-            .header("Content-Type", "application/json");
-
-        if let Some(jwt) = &self.config.jwt_token {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
-        } else {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
-        }
-
-        request_builder = self.apply_common_headers(request_builder);
-
-        if let Some(route) = &self.config.default_route {
-            request_builder = request_builder.header("OpenRouter-Router", route);
-        }
-
-        let response =
-            request_builder
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LLMError::HttpError {
-                    message: e.to_string(),
-                    status_code: None,
-                    body: None,
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.ok();
-            return Err(LLMError::HttpError {
-                message: format!("OpenRouter API error: {}", status),
-                status_code: Some(status.as_u16()),
-                body,
-            });
-        }
-
-        let model_clone = model.clone();
-
-        let stream = async_stream::stream! {
-            let mut buffer = String::new();
-            let mut chunk_count = 0;
-
-            let mut stream = response.bytes_stream();
-
-            while let Ok(Some(bytes)) = stream.try_next().await {
-                let bytes_vec = bytes.to_vec();
-                let chunk_str = String::from_utf8_lossy(&bytes_vec);
-                buffer.push_str(&chunk_str);
-
-                loop {
-                    if let Some(pos) = buffer.find("\n") {
-                        let line = buffer[..pos].to_string();
-                        buffer = buffer[pos + 1..].to_string();
-
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
-                            if data == "[DONE]" {
-                                continue;
-                            }
-                            match serde_json::from_str::<serde_json::Value>(data) {
-                                Ok(json) => {
-                                    let delta = &json["choices"][0]["delta"]["content"];
-                                    if delta.is_null() || !delta.is_string() {
-                                        continue;
-                                    }
-
-                                    let content = delta.as_str().unwrap_or("");
-                                    if content.is_empty() {
-                                        continue;
-                                    }
-
-                                    let finish_reason = json["choices"][0]["finish_reason"]
-                                        .as_str()
-                                        .map(|s| s.to_string());
-
-                                    let chunk = Chunk::Completion(ChunkCompletion {
-                                        id: format!("or_{}", chrono::Utc::now().timestamp_millis()),
-                                        object: "chat.completion.chunk".to_string(),
-                                        created: chrono::Utc::now().timestamp() as u64,
-                                        model: model_clone.clone(),
-                                        choices: vec![ChoiceDelta {
-                                            index: chunk_count,
-                                            delta: Some(ChatMessage::assistant(content)),
-                                            finish_reason,
-                                        }],
-                                    });
-
-                                    yield Ok(chunk);
-                                    chunk_count += 1;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            let final_chunk = Chunk::Completion(ChunkCompletion {
-                id: format!("or_{}", chrono::Utc::now().timestamp_millis()),
-                object: "chat.completion.chunk".to_string(),
-                created: chrono::Utc::now().timestamp() as u64,
-                model: model_clone,
-                choices: vec![ChoiceDelta {
-                    index: chunk_count,
-                    delta: None,
-                    finish_reason: Some("stop".to_string()),
-                }],
-            });
-            yield Ok(final_chunk);
-        };
-
-        Ok(Box::pin(stream))
+        let (response, _) = self.send_streaming_request(request).await?;
+        Ok(crate::stream::adapt_legacy(crate::stream::parse_sse_stream(response)))
     }
+
 
     async fn chat_completion_with_functions(
         &self,
