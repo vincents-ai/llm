@@ -40,7 +40,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::LLMError;
-use crate::types::ChatCompletionRequest;
+use crate::types::{ChatCompletionRequest, ToolChoice, ToolDefinition};
 
 /// The inputs to one request body.
 pub struct ChatRequestParts<'a> {
@@ -104,11 +104,91 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
     if let Some(user) = &request.user {
         body.insert("user".into(), json!(user));
     }
+    if let Some(max_completion_tokens) = request.max_completion_tokens {
+        body.insert("max_completion_tokens".into(), json!(max_completion_tokens));
+    }
+    if let Some(seed) = request.seed {
+        body.insert("seed".into(), json!(seed));
+    }
+    if let Some(logprobs) = request.logprobs {
+        body.insert("logprobs".into(), json!(logprobs));
+    }
+    if let Some(top_logprobs) = request.top_logprobs {
+        body.insert("top_logprobs".into(), json!(top_logprobs));
+    }
+    if let Some(response_format) = &request.response_format {
+        body.insert("response_format".into(), json!(response_format));
+    }
+    if let Some(reasoning) = &request.reasoning {
+        body.insert("reasoning".into(), json!(reasoning));
+    }
+    if let Some(verbosity) = &request.verbosity {
+        body.insert("verbosity".into(), json!(verbosity.as_str()));
+    }
+    if let Some(service_tier) = &request.service_tier {
+        body.insert("service_tier".into(), json!(service_tier.as_str()));
+    }
+    if !request.metadata.is_empty() {
+        body.insert("metadata".into(), json!(request.metadata));
+    }
+    if let Some(parallel_tool_calls) = request.parallel_tool_calls {
+        body.insert("parallel_tool_calls".into(), json!(parallel_tool_calls));
+    }
+    if let Some(tool_choice) = &request.tool_choice {
+        body.insert("tool_choice".into(), tool_choice.to_wire());
+    }
 
     // 3. Tools, when present.
     if let Some(tools) = parts.tools {
         if !tools.is_empty() {
             body.insert("tools".into(), json!(tools));
+        }
+    }
+    // Typed `request.tools`, when the path did not supply pre-serialized ones.
+    if !body.contains_key("tools") {
+        if let Some(tools) = &request.tools {
+            if !tools.is_empty() {
+                body.insert("tools".into(), json!(tools));
+            }
+        }
+    }
+
+    // Cross-field checks that belong before any network I/O. A provider that
+    // silently ignores one of these produces a result that looks like an answer
+    // to a question nobody asked.
+    if request.max_tokens.is_some() && request.max_completion_tokens.is_some() {
+        return Err(LLMError::ConfigurationError {
+            message: "max_tokens and max_completion_tokens are both set; they are not \
+                      interchangeable and no provider documents a precedence"
+                .to_string(),
+            field: Some("max_completion_tokens".to_string()),
+        });
+    }
+    if request.top_logprobs.is_some() && request.logprobs != Some(true) {
+        return Err(LLMError::ConfigurationError {
+            message: "top_logprobs requires logprobs = true".to_string(),
+            field: Some("top_logprobs".to_string()),
+        });
+    }
+    if let Some(choice) = &request.tool_choice {
+        if let ToolChoice::Function { name } = choice {
+            // Naming a tool that is not offered — including when *no* tools are
+            // offered — is a configuration error, not something to forward and
+            // let the provider reject after a round trip.
+            let offered = request.tools.as_ref().is_some_and(|tools| {
+                tools.iter().any(|tool| match tool {
+                    ToolDefinition::Function(f) => f.name == *name,
+                    ToolDefinition::Custom { name: n, .. } => n == name,
+                })
+            });
+            if !offered {
+                return Err(LLMError::ConfigurationError {
+                    message: format!(
+                        "tool_choice names '{name}', which is not among the offered tools"
+                    ),
+                    field: Some("tool_choice".to_string()),
+                });
+            }
         }
     }
 
@@ -316,5 +396,263 @@ mod tests {
         })
         .unwrap();
         assert!(body.get("tools").is_none());
+    }
+}
+
+#[cfg(test)]
+mod modern_parameter_tests {
+    use super::*;
+    use crate::types::{
+        ChatMessage, FunctionDefinitionWire, ReasoningConfig, ReasoningEffort, ResponseFormat,
+        ToolChoice, ToolDefinition, Verbosity,
+    };
+
+    fn messages() -> Vec<Value> {
+        vec![json!({"role": "user", "content": "hi"})]
+    }
+
+    fn build(request: &ChatCompletionRequest, stream: bool) -> Result<Value, LLMError> {
+        build_chat_request(ChatRequestParts {
+            model: "gpt-4o",
+            messages: &messages(),
+            request,
+            stream,
+            tools: None,
+        })
+    }
+
+    fn base() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::user("hi")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unset_modern_parameters_are_omitted() {
+        // A request that uses none of them must serialise exactly as it did
+        // before the fields existed.
+        let body = build(&base(), false).expect("body");
+        for field in [
+            "max_completion_tokens",
+            "seed",
+            "logprobs",
+            "top_logprobs",
+            "response_format",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "reasoning",
+            "verbosity",
+            "service_tier",
+            "metadata",
+        ] {
+            assert!(body.get(field).is_none(), "{field} should be omitted");
+        }
+    }
+
+    #[test]
+    fn every_modern_parameter_reaches_both_paths() {
+        let mut request = base();
+        request.max_completion_tokens = Some(4096);
+        request.seed = Some(7);
+        request.logprobs = Some(true);
+        request.top_logprobs = Some(5);
+        request.response_format = Some(ResponseFormat::JsonObject);
+        request.parallel_tool_calls = Some(true);
+        request.reasoning = Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::high()),
+            max_tokens: Some(1024),
+            ..Default::default()
+        });
+        request.verbosity = Some(Verbosity::low());
+        request.service_tier = Some("flex".into());
+
+        let non_stream = build(&request, false).expect("non-streaming");
+        let stream = build(&request, true).expect("streaming");
+
+        let mut a = non_stream.clone();
+        let mut b = stream.clone();
+        a.as_object_mut().unwrap().remove("stream");
+        b.as_object_mut().unwrap().remove("stream");
+        assert_eq!(a, b, "the modern parameters must not differ by path");
+
+        assert_eq!(non_stream["max_completion_tokens"], 4096);
+        assert_eq!(non_stream["seed"], 7);
+        assert_eq!(non_stream["logprobs"], true);
+        assert_eq!(non_stream["top_logprobs"], 5);
+        assert_eq!(non_stream["parallel_tool_calls"], true);
+        assert_eq!(non_stream["service_tier"], "flex");
+        assert_eq!(non_stream["verbosity"], "low");
+        assert_eq!(non_stream["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn max_tokens_and_max_completion_tokens_together_are_rejected() {
+        // The brief is explicit: reject unless a provider documents a
+        // precedence. They are not interchangeable — a reasoning model counts
+        // reasoning tokens against the limit and rejects the request.
+        let mut request = base();
+        request.max_tokens = Some(100);
+        request.max_completion_tokens = Some(100);
+        let error = build(&request, false).expect_err("must be rejected");
+        match error {
+            LLMError::ConfigurationError { field, message } => {
+                assert_eq!(field.as_deref(), Some("max_completion_tokens"));
+                assert!(message.contains("not"), "{message}");
+            }
+            other => panic!("expected a configuration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_logprobs_without_logprobs_is_rejected() {
+        let mut request = base();
+        request.top_logprobs = Some(3);
+        assert!(build(&request, false).is_err(), "top_logprobs alone is meaningless");
+
+        request.logprobs = Some(false);
+        assert!(
+            build(&request, false).is_err(),
+            "logprobs = false does not make top_logprobs meaningful"
+        );
+
+        request.logprobs = Some(true);
+        assert!(build(&request, false).is_ok());
+    }
+
+    #[test]
+    fn a_tool_choice_naming_an_absent_tool_is_rejected() {
+        let mut request = base();
+        request.tool_choice = Some(ToolChoice::Function {
+            name: "get_weather".into(),
+        });
+        let error = build(&request, false).expect_err("must be rejected");
+        assert!(matches!(error, LLMError::ConfigurationError { .. }));
+
+        request.tools = Some(vec![ToolDefinition::Function(FunctionDefinitionWire {
+            name: "get_time".into(),
+            description: None,
+            parameters: None,
+            strict: None,
+        })]);
+        assert!(
+            build(&request, false).is_err(),
+            "naming a tool that is not offered must still fail"
+        );
+    }
+
+    #[test]
+    fn a_tool_choice_naming_an_offered_tool_is_accepted() {
+        let mut request = base();
+        request.tools = Some(vec![ToolDefinition::Function(FunctionDefinitionWire {
+            name: "get_weather".into(),
+            description: Some("Look up the weather".into()),
+            parameters: Some(json!({"type": "object", "properties": {}})),
+            strict: Some(true),
+        })]);
+        request.tool_choice = Some(ToolChoice::Function {
+            name: "get_weather".into(),
+        });
+        let body = build(&request, false).expect("body");
+        assert_eq!(body["tool_choice"]["function"]["name"], "get_weather");
+        assert_eq!(body["tools"][0]["function"]["strict"], true);
+    }
+
+    #[test]
+    fn tool_choice_variants_serialize_to_the_openai_shapes() {
+        let mut request = base();
+        request.tool_choice = Some(ToolChoice::Auto);
+        assert_eq!(build(&request, false).unwrap()["tool_choice"], "auto");
+        request.tool_choice = Some(ToolChoice::None);
+        assert_eq!(build(&request, false).unwrap()["tool_choice"], "none");
+        request.tool_choice = Some(ToolChoice::Required);
+        assert_eq!(build(&request, false).unwrap()["tool_choice"], "required");
+    }
+
+    #[test]
+    fn a_custom_tool_is_not_shaped_like_a_function() {
+        // §27: provider-operated tools have different lifecycle and authority
+        // semantics, so they must not masquerade as local functions.
+        let mut request = base();
+        request.tools = Some(vec![ToolDefinition::Custom {
+            name: "openrouter:web_search".into(),
+            description: Some("search the web".into()),
+            input_schema: Some(json!({"type": "object"})),
+        }]);
+        let body = build(&request, false).expect("body");
+        assert_eq!(body["tools"][0]["type"], "custom");
+        assert_eq!(body["tools"][0]["name"], "openrouter:web_search");
+    }
+
+    #[test]
+    fn a_json_schema_format_carries_its_schema() {
+        let mut request = base();
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            name: "answer".into(),
+            description: Some("a structured answer".into()),
+            schema: json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            strict: Some(true),
+        });
+        let body = build(&request, false).expect("body");
+        let format = &body["response_format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["json_schema"]["name"], "answer");
+        assert_eq!(format["json_schema"]["strict"], true);
+        assert_eq!(
+            format["json_schema"]["schema"]["properties"]["a"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn an_unknown_reasoning_effort_round_trips() {
+        // The forward-compatibility property: a level this build predates must
+        // be forwarded, not dropped and not a parse failure.
+        let effort: ReasoningEffort = "ultra_turbo".into();
+        let mut request = base();
+        request.reasoning = Some(ReasoningConfig {
+            effort: Some(effort.clone()),
+            ..Default::default()
+        });
+        let body = build(&request, false).expect("body");
+        assert_eq!(body["reasoning"]["effort"], "ultra_turbo");
+
+        let wire = serde_json::to_string(&effort).expect("serializes");
+        let back: ReasoningEffort = serde_json::from_str(&wire).expect("deserializes");
+        assert_eq!(back, effort);
+    }
+
+    #[test]
+    fn an_unknown_verbosity_and_service_tier_round_trip() {
+        let verbosity = Verbosity::from("terse");
+        let tier: crate::types::ServiceTier = "turbo".into();
+        let mut request = base();
+        request.verbosity = Some(verbosity.clone());
+        request.service_tier = Some(tier.clone());
+        let body = build(&request, false).expect("body");
+        assert_eq!(body["verbosity"], "terse");
+        assert_eq!(body["service_tier"], "turbo");
+    }
+
+    #[test]
+    fn a_typed_field_still_wins_over_extra_params() {
+        // Adding a typed field must not open a hole: `temperature` is typed and
+        // an `extra_params` entry for it is still a configuration error.
+        let mut request = base();
+        request.temperature = Some(0.5);
+        // Collide with a field that is *set*, so the typed key really is in the
+        // body and the collision is with something, not with an absence.
+        request
+            .extra_params
+            .insert("temperature".into(), json!(0.9));
+        let error = build(&request, false).expect_err("must be rejected");
+        match error {
+            LLMError::ConfigurationError { field, .. } => {
+                assert_eq!(field.as_deref(), Some("temperature"));
+            }
+            other => panic!("expected a configuration error, got {other:?}"),
+        }
     }
 }

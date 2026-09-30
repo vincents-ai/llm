@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Sort order for model listings
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +348,346 @@ impl Usage {
     }
 }
 
+/// A provider string that this crate does not enumerate.
+///
+/// A validated wrapper rather than an enum with a catch-all variant, because
+/// `#[serde(other)]` only works on a unit variant and therefore *discards* the
+/// value. A wrapper round-trips whatever the provider sent, so a new `effort`
+/// level reaching a build that predates it is forwarded rather than dropped or
+/// rejected — which is the whole forward-compatibility requirement.
+macro_rules! provider_string {
+    ($(#[$meta:meta])* $name:ident, $doc:literal) => {
+        $(#[$meta])*
+        #[doc = $doc]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl $name {
+            /// The raw provider value.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_string())
+            }
+        }
+    };
+}
+
+provider_string!(
+    ReasoningEffort,
+    "Reasoning effort. Free-form so a provider that adds a level is not a      breaking change; the known values are the associated constants below."
+);
+
+impl ReasoningEffort {
+    pub fn none() -> Self {
+        "none".into()
+    }
+    pub fn minimal() -> Self {
+        "minimal".into()
+    }
+    pub fn low() -> Self {
+        "low".into()
+    }
+    pub fn medium() -> Self {
+        "medium".into()
+    }
+    pub fn high() -> Self {
+        "high".into()
+    }
+}
+
+/// How much reasoning detail a model should return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
+}
+
+/// Portable reasoning intent.
+///
+/// Providers map this onto their own shape — OpenRouter exposes both `reasoning`
+/// and `reasoning_effort`, OpenAI's Responses API has a `reasoning` object — so
+/// the caller states an intent and the provider decides the wire form. Ordinary
+/// reasoning control must not require hand-written JSON.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// Cap on reasoning tokens, where the provider exposes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Ask the provider not to return reasoning content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummary>,
+}
+
+provider_string!(
+    Verbosity,
+    "Output verbosity, independent of reasoning effort. OpenAI and OpenRouter      expose the two separately, and a new level must not be a breaking      release, so the value is free-form and round-trips."
+);
+
+impl Verbosity {
+    pub fn low() -> Self {
+        "low".into()
+    }
+    pub fn medium() -> Self {
+        "medium".into()
+    }
+    pub fn high() -> Self {
+        "high".into()
+    }
+}
+
+/// Structured-output request.
+///
+/// Serialized by hand because the wire shape nests the schema details under a
+/// `json_schema` key:
+/// `{"type":"json_schema","json_schema":{"name":...,"schema":{...},"strict":true}}`.
+/// A derived `#[serde(tag = "type")]` would flatten those fields to the top
+/// level, which is a body the provider rejects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseFormat {
+    /// Free text.
+    Text,
+    /// Any valid JSON object.
+    JsonObject,
+    /// JSON matching a schema.
+    JsonSchema {
+        name: String,
+        description: Option<String>,
+        schema: serde_json::Value,
+        strict: Option<bool>,
+    },
+}
+
+impl Serialize for ResponseFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        use serde_json::Value;
+
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            ResponseFormat::Text => {
+                map.serialize_entry("type", "text")?;
+            }
+            ResponseFormat::JsonObject => {
+                map.serialize_entry("type", "json_object")?;
+            }
+            ResponseFormat::JsonSchema {
+                name,
+                description,
+                schema,
+                strict,
+            } => {
+                map.serialize_entry("type", "json_schema")?;
+                let mut inner = serde_json::Map::new();
+                inner.insert("name".into(), Value::String(name.clone()));
+                if let Some(description) = description {
+                    inner.insert("description".into(), Value::String(description.clone()));
+                }
+                inner.insert("schema".into(), schema.clone());
+                if let Some(strict) = strict {
+                    inner.insert("strict".into(), Value::Bool(*strict));
+                }
+                map.serialize_entry("json_schema", &Value::Object(inner))?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponseFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("text") => Ok(ResponseFormat::Text),
+            Some("json_object") => Ok(ResponseFormat::JsonObject),
+            Some("json_schema") => {
+                let inner = value
+                    .get("json_schema")
+                    .ok_or_else(|| D::Error::custom("json_schema format has no 'json_schema' object"))?;
+                Ok(ResponseFormat::JsonSchema {
+                    name: inner
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| D::Error::custom("json_schema requires a name"))?
+                        .to_string(),
+                    description: inner
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    schema: inner
+                        .get("schema")
+                        .cloned()
+                        .ok_or_else(|| D::Error::custom("json_schema requires a schema"))?,
+                    strict: inner.get("strict").and_then(|v| v.as_bool()),
+                })
+            }
+            other => Err(D::Error::custom(format!(
+                "unknown response_format type: {}",
+                other.unwrap_or("<missing>")
+            ))),
+        }
+    }
+}
+
+/// A tool the caller is offering the model.
+///
+/// Serialized by hand for the same reason as [`ResponseFormat`]: the wire shape
+/// nests a function's details under a `function` key
+/// (`{"type":"function","function":{...}}`), and an internally-tagged derived
+/// `Serialize` would flatten them beside `type` instead.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolDefinition {
+    Function(FunctionDefinitionWire),
+    /// A provider-operated tool, which is not a local function and must not be
+    /// shaped like one.
+    Custom {
+        name: String,
+        description: Option<String>,
+        input_schema: Option<serde_json::Value>,
+    },
+}
+
+impl Serialize for ToolDefinition {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            ToolDefinition::Function(function) => {
+                map.serialize_entry("type", "function")?;
+                map.serialize_entry("function", function)?;
+            }
+            ToolDefinition::Custom {
+                name,
+                description,
+                input_schema,
+            } => {
+                map.serialize_entry("type", "custom")?;
+                map.serialize_entry("name", name)?;
+                if let Some(description) = description {
+                    map.serialize_entry("description", description)?;
+                }
+                if let Some(schema) = input_schema {
+                    map.serialize_entry("input_schema", schema)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolDefinition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("function") => {
+                let inner = value
+                    .get("function")
+                    .ok_or_else(|| D::Error::custom("function tool has no 'function' object"))?;
+                Ok(ToolDefinition::Function(
+                    serde_json::from_value(inner.clone()).map_err(D::Error::custom)?,
+                ))
+            }
+            Some("custom") => Ok(ToolDefinition::Custom {
+                name: value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| D::Error::custom("custom tool requires a name"))?
+                    .to_string(),
+                description: value
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                input_schema: value.get("input_schema").cloned(),
+            }),
+            other => Err(D::Error::custom(format!(
+                "unknown tool type: {}",
+                other.unwrap_or("<missing>")
+            ))),
+        }
+    }
+}
+
+/// A function offered to the model, in the wire shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionDefinitionWire {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+    /// Structured-output conformance for the arguments, where the provider
+    /// supports it. Without `strict`, a model may return arguments that do not
+    /// match the schema, which the caller must then handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+/// Which tools the model may call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    None,
+    Auto,
+    Required,
+    Function { name: String },
+}
+
+impl ToolChoice {
+    pub fn to_wire(&self) -> serde_json::Value {
+        match self {
+            ToolChoice::None => serde_json::json!("none"),
+            ToolChoice::Auto => serde_json::json!("auto"),
+            ToolChoice::Required => serde_json::json!("required"),
+            ToolChoice::Function { name } => {
+                serde_json::json!({"type": "function", "function": {"name": name}})
+            }
+        }
+    }
+}
+
+provider_string!(
+    ServiceTier,
+    "Service tier, where the provider offers one. Free-form for the same      reason as `Verbosity`."
+);
+
+impl ServiceTier {
+    pub fn auto() -> Self {
+        "auto".into()
+    }
+    pub fn default_tier() -> Self {
+        "default".into()
+    }
+    pub fn flex() -> Self {
+        "flex".into()
+    }
+    pub fn scale() -> Self {
+        "scale".into()
+    }
+    pub fn priority() -> Self {
+        "priority".into()
+    }
+}
+
 /// A chat completion request
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -405,6 +745,68 @@ pub struct ChatCompletionRequest {
     /// Enable prompt caching for system messages (Anthropic only)
     #[serde(default)]
     pub cache_system: bool,
+
+    // ── Modern parameters ──────────────────────────────────────────────────
+    // Each is optional and omitted from the wire when unset, so a request that
+    // does not use them serialises byte-identically to one built before they
+    // existed.
+
+    /// Token budget that includes reasoning tokens.
+    ///
+    /// Reasoning models count reasoning against `max_tokens` and reject it, so
+    /// this is not an alias for `max_tokens` and the two are never silently
+    /// renamed into each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+
+    /// Seed for deterministic sampling, where the provider supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+
+    /// Request log probabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+
+    /// How many alternatives to return per token.
+    ///
+    /// Only meaningful with `logprobs`; the builder rejects the combination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u8>,
+
+    /// Structured output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+
+    /// Tools offered to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+
+    /// Which of the offered tools the model may call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+
+    /// Whether the model may emit more than one tool call per turn.
+    ///
+    /// Forwarded identically on streaming and non-streaming paths, which is why
+    /// it belongs in the one builder rather than in a path-specific list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+
+    /// Reasoning intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+
+    /// Output verbosity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<Verbosity>,
+
+    /// Service tier, where the provider offers one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
+
+    /// Free-form request metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl Default for ChatCompletionRequest {
@@ -422,6 +824,18 @@ impl Default for ChatCompletionRequest {
             frequency_penalty: None,
             logit_bias: HashMap::new(),
             user: None,
+            max_completion_tokens: None,
+            seed: None,
+            logprobs: None,
+            top_logprobs: None,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            verbosity: None,
+            service_tier: None,
+            metadata: BTreeMap::new(),
             extra_params: HashMap::new(),
             cache_system: false,
         }
