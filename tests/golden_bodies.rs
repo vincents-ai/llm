@@ -560,3 +560,148 @@ fn golden_responses_tool_envelope() {
     assert!(body["tools"][1]["name"].is_null(), "not a named function");
     assert_eq!(body["conversation"], "conv_1");
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// §55 — the compatibility adapter must be indistinguishable from the typed path
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn the_legacy_functions_adapter_produces_the_typed_body() {
+    use vincents_llm::provider::LLMProvider;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn body_of(server: &MockServer) -> Value {
+        let requests = server.received_requests().await.expect("recorded");
+        serde_json::from_slice::<Value>(&requests[0].body).expect("json")
+    }
+
+    async fn mount(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "c", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    let make = |uri: &str| {
+        vincents_llm::openai::OpenAIProvider::with_config(vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(uri.to_string()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        })
+        .expect("provider")
+    };
+
+    let legacy = MockServer::start().await;
+    mount(&legacy).await;
+    let functions = vec![vincents_llm::types::FunctionDefinition {
+        name: "get_weather".into(),
+        description: Some("weather for a city".into()),
+        parameters: Some(json!({"type": "object"})),
+    }];
+    make(&legacy.uri())
+        .chat_completion_with_functions(
+            ChatCompletionRequest {
+                model: "gpt-4o".into(),
+                messages: vec![ChatMessage::user("hi")],
+                ..Default::default()
+            },
+            functions.clone(),
+        )
+        .await
+        .expect("legacy path");
+
+    let typed = MockServer::start().await;
+    mount(&typed).await;
+    make(&typed.uri())
+        .chat_completion(
+            ChatCompletionRequest {
+                model: "gpt-4o".into(),
+                messages: vec![ChatMessage::user("hi")],
+                tools: Some(vec![ToolDefinition::Function(FunctionDefinitionWire {
+                    name: "get_weather".into(),
+                    description: Some("weather for a city".into()),
+                    parameters: Some(json!({"type": "object"})),
+                    strict: None,
+                })]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("typed path");
+
+    // The whole point of the migration: the legacy entry point is now an
+    // adapter, so the two produce the same bytes. A caller migrating from one to
+    // the other must not see the request change on the wire.
+    assert_eq!(body_of(&legacy).await, body_of(&typed).await);
+}
+
+#[tokio::test]
+async fn the_adapter_appends_to_tools_rather_than_replacing_them() {
+    use vincents_llm::provider::LLMProvider;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c", "object": "chat.completion", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    provider
+        .chat_completion_with_functions(
+            ChatCompletionRequest {
+                model: "gpt-4o".into(),
+                messages: vec![ChatMessage::user("hi")],
+                tools: Some(vec![ToolDefinition::Function(FunctionDefinitionWire {
+                    name: "already_set".into(),
+                    description: None,
+                    parameters: None,
+                    strict: None,
+                })]),
+                ..Default::default()
+            },
+            vec![vincents_llm::types::FunctionDefinition {
+                name: "from_legacy".into(),
+                description: None,
+                parameters: None,
+            }],
+        )
+        .await
+        .expect("request");
+
+    let requests = server.received_requests().await.expect("recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    let names: Vec<&str> = body["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["already_set", "from_legacy"],
+        "the union, not a silent replacement"
+    );
+}

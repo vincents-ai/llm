@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::pin::Pin;
 
 use crate::config::ProviderConfig;
@@ -802,181 +801,28 @@ impl LLMProvider for OpenRouterProvider {
     }
 
 
+    /// Compatibility adapter. Deprecated in favour of `request.tools`.
+    ///
+    /// The same adapter shape as the OpenAI provider's, and deliberately so:
+    /// when these two drifted -- OpenRouter hand-building its own body while
+    /// OpenAI went through the shared builder -- the symptom was a request that
+    /// looked fine on one provider and was missing a field on the other.
     async fn chat_completion_with_functions(
         &self,
         request: ChatCompletionRequest,
         functions: Vec<FunctionDefinition>,
     ) -> Result<ChatCompletionResponse> {
-        let model = if request.model.is_empty() {
-            self.get_default_model()?.to_string()
-        } else {
-            request.model.clone()
-        };
-
-        let tools: Vec<serde_json::Value> = functions
-            .iter()
-            .map(|f| {
-                let mut func_obj = json!({
-                    "name": f.name,
-                });
-                if let Some(desc) = &f.description {
-                    func_obj["description"] = json!(desc);
-                }
-                if let Some(params) = &f.parameters {
-                    func_obj["parameters"] = params.clone();
-                }
-                json!({
-                    "type": "function",
-                    "function": func_obj
-                })
-            })
-            .collect();
-
-        // The canonical serializer. This was the *fourth* hand-written copy of
-        // the same match -- the other three were replaced in an earlier commit
-        // for exactly this reason, and it survived because it sat in the
-        // tool-call path rather than the text path.
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(ChatMessage::to_openai_json)
-            .collect();
-
-        let extensions = self.extensions_for(&request);
-        let params = extensions.as_ref().map(|e| e.to_params());
-        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
-            model: &model,
-            messages: &messages,
-            request: &request,
-            stream: false,
-            tools: Some(&tools),
-            provider_params: params.as_ref(),
-        })?;
-
-        let mut request_builder = self
-            .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
-            .header("Content-Type", "application/json");
-
-        if let Some(jwt) = &self.config.jwt_token {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", jwt));
-        } else {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+        let mut request = request;
+        let tools = request.tools.get_or_insert_with(Vec::new);
+        for function in functions {
+            tools.push(ToolDefinition::Function(FunctionDefinitionWire {
+                name: function.name,
+                description: function.description,
+                parameters: function.parameters,
+                strict: None,
+            }));
         }
-
-        request_builder = self.apply_common_headers(request_builder);
-
-        if let Some(route) = &self.config.default_route {
-            request_builder = request_builder.header("OpenRouter-Router", route);
-        }
-
-        let response =
-            request_builder
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LLMError::HttpError {
-                    message: e.to_string(),
-                    status_code: None,
-                    body: None,
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let resp_body = response.text().await.ok();
-            return Err(LLMError::HttpError {
-                message: format!("OpenRouter API error: {}", status),
-                status_code: Some(status.as_u16()),
-                body: resp_body,
-            });
-        }
-
-        let json: serde_json::Value =
-            response
-                .json()
-                .await
-                .map_err(|e| LLMError::SerializationError {
-                    message: e.to_string(),
-                    context: Some("Failed to parse OpenRouter response".to_string()),
-                })?;
-
-        let id = json["id"].as_str().unwrap_or("unknown").to_string();
-        let created = json["created"].as_u64().unwrap_or(0);
-        let resp_model = json["model"].as_str().unwrap_or(&model).to_string();
-
-        let choices: Vec<Choice> = json["choices"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .enumerate()
-            .map(|(idx, choice)| {
-                let msg = &choice["message"];
-                let content = msg
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let tool_calls = msg
-                    .get("tool_calls")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|tc| {
-                                let tc_id = tc
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let func = tc.get("function")?;
-                                let tc_name = func
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let tc_args = func
-                                    .get("arguments")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("{}")
-                                    .to_string();
-                                Some(ToolCall::Function(FunctionCall::Custom(
-                                    CustomFunctionCall {
-                                        id: if tc_id.is_empty() { None } else { Some(tc_id) },
-                                        name: tc_name,
-                                        arguments: tc_args,
-                                    },
-                                )))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|v| !v.is_empty());
-
-                Choice {
-                    index: idx as u32,
-                    message: ChatMessage::Assistant {
-                        content: content.map(MessageContent::Text),
-                        tool_calls,
-                        name: None,
-                    },
-                    finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-                    logprobs: None,
-                }
-            })
-            .collect();
-
-        let usage = json["usage"].as_object().map(|u| Usage::from_openai_json(&serde_json::Value::Object(u.clone())));
-
-        Ok(ChatCompletionResponse {
-            id,
-            object: "chat.completion".to_string(),
-            created,
-            model: resp_model,
-            choices,
-            usage,
-            system_fingerprint: json
-                .get("system_fingerprint")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        })
+        self.chat_completion(request).await
     }
 
     fn supports_function_calling(&self, _model: &str) -> bool {

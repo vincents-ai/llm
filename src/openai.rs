@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use reqwest;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::pin::Pin;
 
 use crate::config::ProviderConfig;
@@ -545,76 +545,34 @@ impl LLMProvider for OpenAIProvider {
         Ok(crate::stream::adapt_legacy(crate::stream::parse_sse_stream(response)))
     }
 
+    /// Compatibility adapter. Deprecated in favour of `request.tools`.
+    ///
+    /// It converts the legacy `functions` parameter into typed
+    /// `request.tools` and then calls [`LLMProvider::chat_completion`]. It used
+    /// to build its own body, duplicate the model resolution, and parse the
+    /// response separately -- three copies of logic that had to be kept in
+    /// agreement by hand, which is how the OpenRouter drift happened in the
+    /// first place.
+    ///
+    /// The behaviour is the same for a caller that already set `tools`: the
+    /// adapter's functions are appended, so a request that supplies both gets
+    /// the union rather than one silently replacing the other.
     async fn chat_completion_with_functions(
         &self,
         request: ChatCompletionRequest,
         functions: Vec<FunctionDefinition>,
     ) -> Result<ChatCompletionResponse> {
-        let start = std::time::Instant::now();
-
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .map(Self::serialize_message)
-            .collect();
-
-        let tools: Vec<Value> = functions
-            .iter()
-            .map(|f| {
-                let mut func_obj = json!({
-                    "name": f.name,
-                });
-                if let Some(desc) = &f.description {
-                    func_obj["description"] = json!(desc);
-                }
-                if let Some(params) = &f.parameters {
-                    func_obj["parameters"] = params.clone();
-                }
-                json!({
-                    "type": "function",
-                    "function": func_obj,
-                })
-            })
-            .collect();
-
-        let model = if request.model.is_empty() {
-            self.config.default_model.clone().ok_or_else(|| {
-                LLMError::ConfigurationError {
-                    message: "No model configured for OpenAIProvider — set default_model in \
-                              OpenAIConfig or pass a model in the request"
-                        .to_string(),
-                    field: Some("default_model".to_string()),
-                }
-            })?
-        } else {
-            request.model.clone()
-        };
-
-        // The same builder again, now with the serialized tools.
-        let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
-            model: &model,
-            messages: &messages,
-            request: &request,
-            stream: false,
-            tools: Some(&tools),
-            provider_params: None,
-        })?;
-
-        let json = self.send_chat_request(body).await?;
-
-        let model = json["model"].as_str().unwrap_or(&request.model).to_string();
-        let response = Self::build_response(json, &request.model);
-
-        let duration = start.elapsed();
-        tracing::info!(
-            target: "llm",
-            provider = "openai",
-            model = model,
-            duration_ms = duration.as_millis(),
-            "LLM function calling request completed"
-        );
-
-        Ok(response)
+        let mut request = request;
+        let tools = request.tools.get_or_insert_with(Vec::new);
+        for function in functions {
+            tools.push(ToolDefinition::Function(FunctionDefinitionWire {
+                name: function.name,
+                description: function.description,
+                parameters: function.parameters,
+                strict: None,
+            }));
+        }
+        self.chat_completion(request).await
     }
 
     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
