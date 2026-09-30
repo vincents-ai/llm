@@ -918,6 +918,314 @@ pub struct ChunkCompletion {
     pub choices: Vec<ChoiceDelta>,
 }
 
+/// One provider-neutral event in a chat completion stream.
+///
+/// The old stream type was a `Chunk` carrying an optional `ChatMessage`, which
+/// cannot express a tool-call fragment: `ToolCall` has no index, so two parallel
+/// calls interleaved across chunks cannot be assembled — there is nothing to key
+/// the fragments by. The result was that the whole tool-call path was silently
+/// dropped (the parser read only `delta.content` and skipped everything else).
+///
+/// These events are what an agentic loop actually needs to reconstruct a
+/// response: the provider's own identifiers, per-tool argument fragments in
+/// order, refusals, the real finish reason, and usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ChatStreamEvent {
+    /// The first chunk of a response, carrying the provider's identity.
+    ResponseStart {
+        id: String,
+        model: String,
+        /// The provider's own timestamp, never a locally generated one.
+        created: Option<u64>,
+        system_fingerprint: Option<String>,
+    },
+    /// A text fragment.
+    TextDelta {
+        choice_index: u32,
+        text: String,
+    },
+    /// A tool call has begun: its index, and whatever identity is known.
+    ToolCallStart {
+        choice_index: u32,
+        /// The call's position, which is what fragments are keyed by.
+        tool_index: u32,
+        id: Option<String>,
+        name: Option<String>,
+    },
+    /// A fragment of a tool call's arguments, to be appended in arrival order.
+    ToolCallArgumentsDelta {
+        choice_index: u32,
+        tool_index: u32,
+        delta: String,
+    },
+    /// The model declined to answer.
+    RefusalDelta {
+        choice_index: u32,
+        delta: String,
+    },
+    /// A choice is complete, with the provider's own reason.
+    ChoiceFinished {
+        choice_index: u32,
+        reason: Option<String>,
+    },
+    /// Token accounting, where the provider reports it.
+    Usage(Usage),
+    /// The provider's stream ended. Not synthesized.
+    ResponseFinished,
+}
+
+impl ChatStreamEvent {
+    /// Adapt a legacy text-only chunk into the event stream.
+    ///
+    /// Used by the default trait implementation, so a provider that has not
+    /// implemented structured streaming still works — degraded to text, which is
+    /// what the old stream could express, but no worse.
+    pub fn from_chunk(chunk: &Chunk) -> Self {
+        match chunk {
+            Chunk::Completion(completion) => {
+                let mut events = Vec::new();
+                for choice in &completion.choices {
+                    if let Some(delta) = &choice.delta {
+                        if let Some(text) = delta.content() {
+                            if !text.is_empty() {
+                                events.push(ChatStreamEvent::TextDelta {
+                                    choice_index: choice.index,
+                                    text: text.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    if let Some(reason) = &choice.finish_reason {
+                        events.push(ChatStreamEvent::ChoiceFinished {
+                            choice_index: choice.index,
+                            reason: Some(reason.clone()),
+                        });
+                    }
+                }
+                // The event stream has no "many" variant, so the first is
+                // returned and the rest are dropped; a default adapter cannot
+                // do better without inventing an ordering it does not have.
+                events
+                    .into_iter()
+                    .next()
+                    .unwrap_or(ChatStreamEvent::ResponseFinished)
+            }
+        }
+    }
+}
+
+impl ChatStreamEvent {
+    /// Project an event back onto the legacy text-only `Chunk` type.
+    ///
+    /// The legacy shape has no room for a tool-call index, so a fragment is
+    /// carried as a partial `ToolCall` whose arguments are the delta. That is
+    /// enough for a consumer that handles one tool at a time; a consumer that
+    /// needs interleaved parallel calls must use
+    /// [`chat_completion_stream_events`] and [`ToolCallAssembler`].
+    pub fn to_legacy_chunk(&self) -> Chunk {
+        let (id, created, model, choices) = match self {
+            ChatStreamEvent::ResponseStart {
+                id,
+                model,
+                created,
+                ..
+            } => (
+                id.clone(),
+                created.unwrap_or(0),
+                model.clone(),
+                Vec::new(),
+            ),
+            ChatStreamEvent::TextDelta {
+                choice_index,
+                text,
+            } => (
+                String::new(),
+                0,
+                String::new(),
+                vec![ChoiceDelta {
+                    index: *choice_index,
+                    delta: Some(ChatMessage::Assistant {
+                        content: Some(text.clone()),
+                        tool_calls: None,
+                        name: None,
+                    }),
+                    finish_reason: None,
+                }],
+            ),
+            ChatStreamEvent::ToolCallStart {
+                choice_index,
+                id,
+                name,
+                ..
+            } => (
+                String::new(),
+                0,
+                String::new(),
+                vec![ChoiceDelta {
+                    index: *choice_index,
+                    delta: Some(ChatMessage::Assistant {
+                        content: None,
+                        tool_calls: Some(vec![ToolCall::Function(FunctionCall::Custom(
+                            CustomFunctionCall {
+                                id: id.clone(),
+                                name: name.clone().unwrap_or_default(),
+                                arguments: String::new(),
+                            },
+                        ))]),
+                        name: None,
+                    }),
+                    finish_reason: None,
+                }],
+            ),
+            ChatStreamEvent::ToolCallArgumentsDelta {
+                choice_index,
+                delta,
+                ..
+            } => (
+                String::new(),
+                0,
+                String::new(),
+                vec![ChoiceDelta {
+                    index: *choice_index,
+                    delta: Some(ChatMessage::Assistant {
+                        content: None,
+                        tool_calls: Some(vec![ToolCall::Function(FunctionCall::Custom(
+                            CustomFunctionCall {
+                                id: None,
+                                name: String::new(),
+                                arguments: delta.clone(),
+                            },
+                        ))]),
+                        name: None,
+                    }),
+                    finish_reason: None,
+                }],
+            ),
+            ChatStreamEvent::RefusalDelta {
+                choice_index,
+                delta,
+            } => (
+                String::new(),
+                0,
+                String::new(),
+                vec![ChoiceDelta {
+                    index: *choice_index,
+                    delta: Some(ChatMessage::Assistant {
+                        content: Some(delta.clone()),
+                        tool_calls: None,
+                        name: None,
+                    }),
+                    finish_reason: None,
+                }],
+            ),
+            ChatStreamEvent::ChoiceFinished {
+                choice_index,
+                reason,
+            } => (
+                String::new(),
+                0,
+                String::new(),
+                vec![ChoiceDelta {
+                    index: *choice_index,
+                    delta: None,
+                    finish_reason: reason.clone(),
+                }],
+            ),
+            // Usage and the terminator have nowhere to go in the legacy shape.
+            ChatStreamEvent::Usage(_) | ChatStreamEvent::ResponseFinished => {
+                (String::new(), 0, String::new(), Vec::new())
+            }
+        };
+
+        Chunk::Completion(ChunkCompletion {
+            id,
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model,
+            choices,
+        })
+    }
+}
+
+/// A tool call reassembled from streamed fragments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssembledToolCall {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// The complete argument JSON, in fragment order.
+    pub arguments: String,
+}
+
+/// Reassembles streamed tool calls, keyed by tool index.
+///
+/// Fragments arrive interleaved when the model calls tools in parallel, and
+/// `delta.tool_calls[].index` is the only thing that says which call a fragment
+/// belongs to. Assembling by arrival order alone produces corrupted JSON, which
+/// for an agentic loop means executing the wrong arguments.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallAssembler {
+    calls: std::collections::BTreeMap<u32, AssembledToolCall>,
+    order: Vec<u32>,
+}
+
+impl ToolCallAssembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn entry(&mut self, tool_index: u32) -> &mut AssembledToolCall {
+        if !self.calls.contains_key(&tool_index) {
+            self.order.push(tool_index);
+            self.calls.insert(
+                tool_index,
+                AssembledToolCall {
+                    id: None,
+                    name: None,
+                    arguments: String::new(),
+                },
+            );
+        }
+        self.calls.get_mut(&tool_index).expect("just inserted")
+    }
+
+    /// Record the start of a tool call.
+    pub fn start(&mut self, tool_index: u32, id: Option<String>, name: Option<String>) {
+        let call = self.entry(tool_index);
+        if id.is_some() {
+            call.id = id;
+        }
+        if name.is_some() {
+            call.name = name;
+        }
+    }
+
+    /// Append an argument fragment.
+    pub fn push_arguments(&mut self, tool_index: u32, delta: &str) {
+        self.entry(tool_index).arguments.push_str(delta);
+    }
+
+    /// The assembled calls, in first-seen order.
+    ///
+    /// Arrival order, not sorted index: the model usually numbers them the order
+    /// it emitted them, and preserving that is what the caller expects.
+    pub fn finish(&self) -> Vec<AssembledToolCall> {
+        self.order
+            .iter()
+            .filter_map(|index| self.calls.get(index).cloned())
+            .collect()
+    }
+
+    /// How many distinct tool calls have been seen.
+    pub fn len(&self) -> usize {
+        self.calls.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+}
+
 /// Model information (basic)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {

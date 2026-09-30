@@ -34,10 +34,20 @@ pub struct ModelListRequest {
 ///
 /// ```rust,no_run
 /// use async_trait::async_trait;
-/// use vincents_llm::{LLMProvider, ChatCompletionRequest, ChatCompletionResponse, LLMError};
+/// use vincents_llm::{
+///     ChatCompletionRequest, ChatCompletionResponse, LLMError, LLMProvider,
+/// };
+/// // The crate's one-parameter `Result` alias; `std`'s would need the error
+/// // type spelled out on every signature.
+/// use vincents_llm::error::Result;
+/// use vincents_llm::config::ProviderConfig;
+/// use vincents_llm::types::FunctionDefinition;
+/// use vincents_llm::{CostEstimate, RateLimitStatus};
+/// use std::sync::Arc;
 ///
 /// struct MyProvider {
 ///     api_key: String,
+///     config: Arc<ProviderConfig>,
 /// }
 ///
 /// #[async_trait]
@@ -53,12 +63,40 @@ pub struct ModelListRequest {
 ///     async fn chat_completion(
 ///         &self,
 ///         request: ChatCompletionRequest,
-///     ) -> Result<ChatCompletionResponse, LLMError> {
+///     ) -> Result<ChatCompletionResponse> {
 ///         // Implementation here
 ///         todo!()
 ///     }
+///
+///     async fn chat_completion_with_functions(
+///         &self,
+///         request: ChatCompletionRequest,
+///         _functions: Vec<FunctionDefinition>,
+///     ) -> Result<ChatCompletionResponse> {
+///         todo!()
+///     }
+///
+///     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
+///         todo!()
+///     }
+///
+///     async fn estimate_cost(
+///         &self,
+///         _request: &ChatCompletionRequest,
+///     ) -> Result<CostEstimate> {
+///         todo!()
+///     }
+///
+///     fn config(&self) -> &ProviderConfig {
+///         &self.config
+///     }
 /// }
 /// ```
+///
+/// The four items above are the trait's required methods with no default. This
+/// doc test used to fail to compile because the example implemented only
+/// `name`, `supported_models` and `chat_completion`, so a reader copying it got
+/// an error rather than a starting point.
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     /// Get the provider name
@@ -137,6 +175,24 @@ pub trait LLMProvider: Send + Sync {
     ) -> Result<ChatCompletionResponse>;
 
     /// Generate chat completion with streaming
+    /// Lossless structured streaming, when the provider supports it.
+    ///
+    /// Defaulted so third-party providers keep compiling. The default adapts
+    /// whatever the legacy `chat_completion_stream` produced, so an unimplemented
+    /// provider degrades to text-only rather than failing.
+    async fn chat_completion_stream_events(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + Send>>> {
+        use futures::StreamExt as _;
+
+        let chunks = self.chat_completion_stream(request).await?;
+        Ok(Box::pin(chunks.filter_map(|chunk| async move {
+            let chunk = chunk.ok()?;
+            Some(Ok(ChatStreamEvent::from_chunk(&chunk)))
+        })))
+    }
+
     async fn chat_completion_stream(
         &self,
         _request: ChatCompletionRequest,

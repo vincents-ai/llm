@@ -730,3 +730,97 @@ async fn openai_and_openrouter_serialise_the_same_conversation_identically() {
         "the two providers diverge on the same conversation"
     );
 }
+
+/// §22: interleaved parallel tool calls must reassemble correctly.
+///
+/// The fixture is the exact event sequence from the brief. The point is argument
+/// *byte order*: fragments for tool 0 and tool 1 interleave, and assembling by
+/// arrival order rather than by `index` yields corrupt JSON — which, for an
+/// agentic loop, means executing the wrong arguments.
+#[tokio::test]
+async fn interleaved_parallel_tool_calls_assemble_by_index_not_arrival_order() {
+    use futures::StreamExt as _;
+    use vincents_llm::types::ToolCallAssembler;
+
+    let server = MockServer::start().await;
+    let events = sse(&[
+        // Both calls are announced.
+        &json!({"id": "chatcmpl-tools", "object": "chat.completion.chunk", "created": 1_700_000_500,
+                "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                    {"index": 0, "id": "call_a", "type": "function", "function": {"name": "get_weather", "arguments": ""}},
+                    {"index": 1, "id": "call_b", "type": "function", "function": {"name": "get_time", "arguments": ""}}
+                ]}, "finish_reason": null}]}).to_string(),
+        // Interleaved fragments.
+        &json!({"id": "chatcmpl-tools", "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\":"}}]}, "finish_reason": null}]}).to_string(),
+        &json!({"id": "chatcmpl-tools", "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "function": {"arguments": "{\"tz\":"}}]}, "finish_reason": null}]}).to_string(),
+        &json!({"id": "chatcmpl-tools", "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"Oslo\"}"}}]}, "finish_reason": null}]}).to_string(),
+        &json!({"id": "chatcmpl-tools", "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "function": {"arguments": "\"UTC\"}"}}]}, "finish_reason": null}]}).to_string(),
+        &json!({"id": "chatcmpl-tools", "created": 1_700_000_500, "model": "gpt-4o-2024-08-06",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 18, "total_tokens": 48}}).to_string(),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(events, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let mut stream = openai(&server)
+        .chat_completion_stream_events(text_request())
+        .await
+        .expect("stream opens");
+
+    let mut assembler = ToolCallAssembler::new();
+    let mut usage = None;
+    let mut finished = false;
+    let mut finish_reasons = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event.expect("event") {
+            vincents_llm::types::ChatStreamEvent::ToolCallStart {
+                tool_index,
+                id,
+                name,
+                ..
+            } => assembler.start(tool_index, id, name),
+            vincents_llm::types::ChatStreamEvent::ToolCallArgumentsDelta {
+                tool_index,
+                delta,
+                ..
+            } => assembler.push_arguments(tool_index, &delta),
+            vincents_llm::types::ChatStreamEvent::Usage(u) => usage = Some(u),
+            vincents_llm::types::ChatStreamEvent::ResponseFinished => finished = true,
+            vincents_llm::types::ChatStreamEvent::ChoiceFinished { reason, .. } => {
+                finish_reasons.push(reason.unwrap_or_default())
+            }
+            _ => {}
+        }
+    }
+
+    let calls = assembler.finish();
+    assert_eq!(calls.len(), 2, "both parallel calls must be reassembled");
+    assert_eq!(calls[0].id.as_deref(), Some("call_a"));
+    assert_eq!(calls[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(
+        calls[0].arguments, r#"{"city":"Oslo"}"#,
+        "tool 0's fragments must be concatenated in their own order"
+    );
+    assert_eq!(calls[1].id.as_deref(), Some("call_b"));
+    assert_eq!(
+        calls[1].arguments, r#"{"tz":"UTC"}"#,
+        "tool 1's fragments must not be contaminated by tool 0's"
+    );
+    // Both are valid JSON, which is the real assertion: arrival-order assembly
+    // would produce `{"city":{"tz":"Oslo"}"`.
+    assert!(serde_json::from_str::<serde_json::Value>(&calls[0].arguments).is_ok());
+    assert!(serde_json::from_str::<serde_json::Value>(&calls[1].arguments).is_ok());
+
+    assert_eq!(finish_reasons, vec!["tool_calls".to_string()]);
+    let usage = usage.expect("usage must be captured");
+    assert_eq!(usage.total_tokens, 48);
+    assert!(finished, "the provider's terminator must be reported");
+}
