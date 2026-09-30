@@ -157,6 +157,39 @@ impl MessageContent {
         }
     }
 
+    /// The number of characters of text in this content.
+    ///
+    /// For a `Parts` list this sums the text parts and ignores every other
+    /// part. It is a size *heuristic* for context-compaction decisions, not a
+    /// measure of the content: an image's cost is real but is not expressible
+    /// in characters. `Display` gives the same text; this exists because
+    /// compaction needs a number.
+    pub fn text_char_len(&self) -> usize {
+        match self {
+            MessageContent::Text(text) => text.chars().count(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => text.chars().count(),
+                    _ => 0,
+                })
+                .sum(),
+        }
+    }
+
+    /// The text truncated to at most `max_chars`, if it is text.
+    ///
+    /// `None` for multimodal content. Truncating a message that contains an
+    /// image by character count would silently drop or corrupt the image, so a
+    /// caller that compacts context must decide what to do with a
+    /// non-truncatable message rather than have this guess.
+    pub fn truncated_text(&self, max_chars: usize) -> Option<String> {
+        match self {
+            MessageContent::Text(text) => Some(text.chars().take(max_chars).collect()),
+            MessageContent::Parts(_) => None,
+        }
+    }
+
     /// Whether the content carries anything beyond text.
     pub fn is_multimodal(&self) -> bool {
         matches!(self, MessageContent::Parts(parts)
