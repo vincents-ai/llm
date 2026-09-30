@@ -74,6 +74,91 @@ pub struct ChatRequestParts<'a> {
 /// map must not be able to override a typed setting: that makes a configuration
 /// error indistinguishable from a deliberate one, and makes benchmark runs
 /// unreproducible.
+/// Validate a request before any body is assembled or any network I/O happens.
+///
+/// §51. Every rule here is a conflict that a provider would either reject with
+/// an opaque 400 or -- worse -- silently resolve, producing an answer to a
+/// question the caller did not ask.
+///
+/// Ordered so that the most fundamental failure is reported first: validity,
+/// then modality, then collisions.
+pub fn validate_request(
+    request: &crate::types::ChatCompletionRequest,
+    parts: &ChatRequestParts<'_>,
+) -> crate::error::Result<()> {
+    // Cross-field checks that belong before any network I/O. A provider that
+    // silently ignores one of these produces a result that looks like an answer
+    // to a question nobody asked.
+
+    // §51, added here because the others were not enough: a `stream_options`
+    // block on a non-streaming request is either ignored or rejected depending
+    // on the provider, and `include_usage` is exactly the setting that decides
+    // whether the caller ever learns what the request cost.
+    if parts.stream == false && request.extra_params.contains_key("stream_options") {
+        return Err(LLMError::InvalidParameterCombination {
+            message: "stream_options was set on a non-streaming request (stream = false); \
+                      include_usage only applies to streams"
+                .to_string(),
+        });
+    }
+    if request.max_tokens.is_some() && request.max_completion_tokens.is_some() {
+        return Err(LLMError::ConfigurationError {
+            message: "max_tokens and max_completion_tokens are both set; they are not \
+                      interchangeable and no provider documents a precedence"
+                .to_string(),
+            field: Some("max_completion_tokens".to_string()),
+        });
+    }
+    if request.top_logprobs.is_some() && request.logprobs != Some(true) {
+        return Err(LLMError::ConfigurationError {
+            message: "top_logprobs requires logprobs = true".to_string(),
+            field: Some("top_logprobs".to_string()),
+        });
+    }
+    if let Some(choice) = &request.tool_choice {
+        if let ToolChoice::Function { name } = choice {
+            // Naming a tool that is not offered — including when *no* tools are
+            // offered — is a configuration error, not something to forward and
+            // let the provider reject after a round trip.
+            let offered = request.tools.as_ref().is_some_and(|tools| {
+                tools.iter().any(|tool| match tool {
+                    ToolDefinition::Function(f) => f.name == *name,
+                    ToolDefinition::Custom { name: n, .. } => n == name,
+                })
+            });
+            if !offered {
+                // The offered names are in the message, not just the one the
+                // caller asked for. "You named get_stock" leaves them to
+                // diff it against their own tool list by hand, which is the
+                // work this error exists to save.
+                let offered_names: Vec<&str> = request
+                    .tools
+                    .as_ref()
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .map(|tool| match tool {
+                                ToolDefinition::Function(f) => f.name.as_str(),
+                                ToolDefinition::Custom { name, .. } => name.as_str(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Err(LLMError::ConfigurationError {
+                    message: format!(
+                        "tool_choice names '{name}', which is not among the offered tools: \
+                         [{}]",
+                        offered_names.join(", ")
+                    ),
+                    field: Some("tool_choice".to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError> {
     let request = parts.request;
     let mut body = Map::new();
@@ -162,44 +247,11 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
         }
     }
 
-    // Cross-field checks that belong before any network I/O. A provider that
-    // silently ignores one of these produces a result that looks like an answer
-    // to a question nobody asked.
-    if request.max_tokens.is_some() && request.max_completion_tokens.is_some() {
-        return Err(LLMError::ConfigurationError {
-            message: "max_tokens and max_completion_tokens are both set; they are not \
-                      interchangeable and no provider documents a precedence"
-                .to_string(),
-            field: Some("max_completion_tokens".to_string()),
-        });
-    }
-    if request.top_logprobs.is_some() && request.logprobs != Some(true) {
-        return Err(LLMError::ConfigurationError {
-            message: "top_logprobs requires logprobs = true".to_string(),
-            field: Some("top_logprobs".to_string()),
-        });
-    }
-    if let Some(choice) = &request.tool_choice {
-        if let ToolChoice::Function { name } = choice {
-            // Naming a tool that is not offered — including when *no* tools are
-            // offered — is a configuration error, not something to forward and
-            // let the provider reject after a round trip.
-            let offered = request.tools.as_ref().is_some_and(|tools| {
-                tools.iter().any(|tool| match tool {
-                    ToolDefinition::Function(f) => f.name == *name,
-                    ToolDefinition::Custom { name: n, .. } => n == name,
-                })
-            });
-            if !offered {
-                return Err(LLMError::ConfigurationError {
-                    message: format!(
-                        "tool_choice names '{name}', which is not among the offered tools"
-                    ),
-                    field: Some("tool_choice".to_string()),
-                });
-            }
-        }
-    }
+    // All cross-field checks run first, before the body is assembled and before
+    // any network I/O. Order is deliberate: validity before collision, because
+    // a request that is invalid on its own terms should say so rather than
+    // complain that `extra_params` shadows a field the caller never got to use.
+    validate_request(request, &parts)?;
 
     // 4. Provider-specific extensions, then the raw escape hatch. Both are
     //    collision-checked, and both come last.
