@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::pin::Pin;
 
 use crate::config::ProviderConfig;
@@ -100,10 +100,115 @@ impl AnthropicProvider {
         })
     }
 
+/// Translate a user message into Anthropic content blocks.
+///
+/// A bare string for text-only content, because that is what this provider has
+/// always received and every existing request depends on it. A block list only
+/// when there is genuinely more than one part.
+///
+/// Each block uses Anthropic's own vocabulary. Sending `{"type": "image_url"}`
+/// here -- which is what a direct `serde` pass over the shared `ContentPart`
+/// produced -- sends the *OpenAI* shape to an Anthropic endpoint, which is
+/// worse than refusing: the request looks well-formed in a log and is rejected
+/// or misread by the API.
+///
+/// A part this provider cannot express is [`LLMError::UnsupportedFeature`]
+/// rather than a silent omission. Dropping an image yields an answer to a
+/// question the model never received the image for.
+fn user_blocks(content: &MessageContent, model: &str) -> Result<Value> {
+    use crate::types::{ContentPart, MessageContent};
+    let MessageContent::Parts(parts) = content else {
+        return Ok(Value::String(content.as_text().unwrap_or_default().to_string()));
+    };
+    let mut blocks = Vec::with_capacity(parts.len());
+    for part in parts {
+        blocks.push(match part {
+            ContentPart::Text { text } => json!({"type": "text", "text": text}),
+            ContentPart::ImageUrl { url, .. } => Self::anthropic_image(url, model)?,
+            ContentPart::InputAudio { .. } => {
+                return Err(LLMError::UnsupportedFeature {
+                    feature: "input_audio".to_string(),
+                    model: model.to_string(),
+                })
+            }
+            ContentPart::File { .. } => {
+                return Err(LLMError::UnsupportedFeature {
+                    feature: "file content parts".to_string(),
+                    model: model.to_string(),
+                })
+            }
+        });
+    }
+    // A single text block needs no list: this provider accepts the string, and
+    // every text-only request that worked before must keep working.
+    if blocks.len() == 1 {
+        if let Some(text) = blocks[0].get("text").and_then(|t| t.as_str()) {
+            return Ok(Value::String(text.to_string()));
+        }
+    }
+    Ok(Value::Array(blocks))
+}
+
+    /// The payload after the first comma of a data URL.
+    ///
+    /// Needed because a `data:` URL's media-type segment may carry a `;base64`
+    /// marker, so the text after the first comma is not always the payload.
+    fn rest_data(url: &str) -> &str {
+        url.split_once(',').map(|(_, data)| data).unwrap_or("")
+    }
+
+    /// One image block, choosing the source shape from the URL.
+///
+/// A `data:` URL carries its own media type, so it becomes a `base64` source. A
+/// bare https URL becomes a `url` source. Anything else -- an `http` URL the
+/// provider will not fetch, a relative path -- is refused rather than guessed
+/// at, because guessing picks a source type the API rejects.
+fn anthropic_image(url: &str, model: &str) -> Result<Value> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (media_type, data) = rest.split_once(',').ok_or_else(|| {
+            LLMError::InvalidRequestError {
+                message: format!(
+                    "data URL has no comma separating media type from data: {url}"
+                ),
+                param: None,
+                code: None,
+            }
+        })?;
+        // `image/jpeg;base64` is not a media type. The `;base64` marker belongs
+        // to the URL, not to the type, and sending it back inside
+        // `media_type` makes the API reject the block.
+        let (media_type, encoded) = match media_type.split_once(';') {
+            Some((media_type, marker)) => {
+                (media_type.to_string(), marker.eq_ignore_ascii_case("base64"))
+            }
+            None => (media_type.to_string(), false),
+        };
+        return Ok(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": if encoded { data } else { Self::rest_data(url) },
+            }
+        }));
+    }
+    if url.starts_with("https://") {
+        return Ok(json!({
+            "type": "image",
+            "source": {"type": "url", "url": url}
+        }));
+    }
+    Err(LLMError::UnsupportedFeature {
+        feature: format!("an image URL that is neither a data: URL nor https ({url})"),
+        model: model.to_string(),
+    })
+}
+
     fn convert_messages(
         &self,
         messages: &[ChatMessage],
-    ) -> (Option<String>, Vec<serde_json::Value>) {
+    ) -> Result<(Option<String>, Vec<serde_json::Value>)> {
+        let model = self.config.default_model.clone().unwrap_or_default();
         let mut system_value: Option<String> = None;
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -123,18 +228,37 @@ impl AnthropicProvider {
                     });
                 }
                 ChatMessage::User { content, .. } => {
-                    let user_msg = json!({
-                        "role": "user",
-                        "content": content
-                    });
+                    let blocks = Self::user_blocks(content, &model)?;
                     if let Some(last) = anthropic_messages.last_mut() {
                         if last["role"] == "user" {
-                            let existing = last["content"].as_str().unwrap_or("");
-                            last["content"] = json!(format!("{}\n\n{}", existing, content));
+                            // Merging two user turns into one is what this
+                            // provider expects. The merge has to happen at block
+                            // level once either side is multimodal: concatenating
+                            // the JSON would produce one malformed block.
+                            match (&mut last["content"], blocks) {
+                                (Value::String(existing), Value::Array(mut extra)) => {
+                                    extra.insert(
+                                        0,
+                                        json!({"type": "text",
+                                               "text": format!("{existing}\n\n")}),
+                                    );
+                                    last["content"] = Value::Array(extra);
+                                }
+                                (Value::Array(existing), blocks) => {
+                                    match blocks {
+                                        Value::String(text) => {
+                                            existing.push(json!({"type": "text", "text": text}));
+                                        }
+                                        Value::Array(more) => existing.extend(more),
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
                             continue;
                         }
                     }
-                    anthropic_messages.push(user_msg);
+                    anthropic_messages.push(json!({"role": "user", "content": blocks}));
                 }
                 ChatMessage::Assistant {
                     content,
@@ -261,7 +385,7 @@ impl AnthropicProvider {
             }
         }
 
-        (system_value, anthropic_messages)
+        Ok((system_value, anthropic_messages))
     }
 
     fn convert_response(
@@ -337,14 +461,24 @@ impl AnthropicProvider {
         // dialect gets its own mapping rather than the OpenAI one. `cache_read`
         // is Anthropic's cached-token count; `cache_creation` is the
         // cache-write count OpenAI does not report at all.
-        let usage = json["usage"].as_object().map(|u| Usage {
-            prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32
-                + u["output_tokens"].as_u64().unwrap_or(0) as u32,
-            reasoning_tokens: None,
-            cached_tokens: u["cache_read_input_tokens"].as_u64().map(|v| v as u32),
-            cache_write_tokens: u["cache_creation_input_tokens"].as_u64().map(|v| v as u32),
+        // `get` throughout, never indexing. Indexing a `Map` with a missing key
+        // panics, and every one of these keys is optional: an Anthropic response
+        // with no `cache_creation_input_tokens` used to crash response parsing
+        // outright. That was live before this change and had no test covering it.
+        let usage = json["usage"].as_object().map(|u| {
+            let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            Usage {
+                prompt_tokens: input,
+                completion_tokens: output,
+                total_tokens: input + output,
+                reasoning_tokens: None,
+                cached_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+                cache_write_tokens: u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
+            }
         });
 
         Ok(ChatCompletionResponse {
@@ -536,7 +670,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_value, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages)?;
 
         let mut body = json!({
             "model": model,
@@ -588,7 +722,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_value, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages)?;
 
         let mut body = serde_json::json!({
             "model": model,
@@ -737,7 +871,7 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let (system_value, messages) = self.convert_messages(&request.messages);
+        let (system_value, messages) = self.convert_messages(&request.messages)?;
 
         let tools: Vec<serde_json::Value> = functions
             .iter()

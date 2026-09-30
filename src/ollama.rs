@@ -38,8 +38,74 @@ pub struct OllamaProvider {
     client: reqwest::Client,
 }
 
-fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
-    match msg {
+/// Split user content into the text Ollama carries and the images it carries.
+///
+/// Returns `Err` for a part this provider cannot express rather than dropping
+/// it. Silently omitting an image produces an answer to a question the model
+/// never received the image for, and that reads as a successful call.
+fn user_content(
+    content: &MessageContent,
+    model: &str,
+) -> crate::error::Result<(String, Vec<String>)> {
+    use crate::types::{ContentPart, MessageContent};
+    let (text, images) = match content {
+        MessageContent::Text(text) => (text.clone(), Vec::new()),
+        MessageContent::Parts(parts) => {
+            let mut text = Vec::new();
+            let mut images = Vec::new();
+            for part in parts {
+                match part {
+                    ContentPart::Text { text: t } => text.push(t.clone()),
+                    ContentPart::ImageUrl { url, .. } => {
+                        images.push(ollama_image(url, model)?);
+                    }
+                    ContentPart::InputAudio { .. } => {
+                        return Err(crate::error::LLMError::UnsupportedFeature {
+                            feature: "input_audio".to_string(),
+                            model: model.to_string(),
+                        })
+                    }
+                    ContentPart::File { .. } => {
+                        return Err(crate::error::LLMError::UnsupportedFeature {
+                            feature: "file content parts".to_string(),
+                            model: model.to_string(),
+                        })
+                    }
+                }
+            }
+            (text.join("\n"), images)
+        }
+    };
+    Ok((text, images))
+}
+
+/// One image as the raw base64 Ollama wants.
+///
+/// Ollama takes base64 only, so a remote URL is refused rather than fetched
+/// here: downloading an image inside a request path is a network call the
+/// caller did not ask for, and silently doing it would be surprising.
+fn ollama_image(url: &str, model: &str) -> crate::error::Result<String> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (_, data) = rest.split_once(',').ok_or_else(|| {
+            crate::error::LLMError::InvalidRequestError {
+                message: format!("data URL has no comma separating media type from data: {url}"),
+                param: None,
+                code: None,
+            }
+        })?;
+        return Ok(data.strip_prefix("base64").unwrap_or(data).to_string());
+    }
+    Err(crate::error::LLMError::UnsupportedFeature {
+        feature: format!(
+            "a remote image URL (Ollama takes base64 data only): {url}"
+        ),
+        model: model.to_string(),
+    })
+}
+
+fn serialize_message(msg: &ChatMessage) -> crate::error::Result<serde_json::Value> {
+    let msg_model = "";
+    Ok(match msg {
         ChatMessage::Developer { content, .. } | ChatMessage::System { content, .. } => {
             // Ollama has no `developer` role, so a developer message is sent as
             // `system`. That is a real semantic collapse -- noted rather than
@@ -52,10 +118,16 @@ fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
             })
         }
         ChatMessage::User { content, .. } => {
-            json!({
-                "role": "user",
-                "content": content
-            })
+            let (text, images) = user_content(content, msg_model)?;
+            let mut obj = json!({"role": "user", "content": text});
+            // Ollama's shape: images are a sibling array of raw base64, not
+            // inline blocks. Sending the shared `ContentPart` JSON verbatim put
+            // `{"type": "image_url", ...}` on the wire, which is the OpenAI
+            // spelling and means nothing here.
+            if !images.is_empty() {
+                obj["images"] = json!(images);
+            }
+            obj
         }
         ChatMessage::Assistant {
             content,
@@ -111,7 +183,7 @@ fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
                 "tool_name": name
             })
         }
-    }
+    })
 }
 
 fn parse_tool_calls(tool_calls: &serde_json::Value) -> Option<Vec<ToolCall>> {
@@ -427,7 +499,11 @@ impl LLMProvider for OllamaProvider {
         };
 
         let messages: Vec<serde_json::Value> =
-            request.messages.iter().map(serialize_message).collect();
+            request
+            .messages
+            .iter()
+            .map(serialize_message)
+            .collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = json!({
             "model": model,
@@ -538,7 +614,11 @@ impl LLMProvider for OllamaProvider {
         };
 
         let messages: Vec<serde_json::Value> =
-            request.messages.iter().map(serialize_message).collect();
+            request
+            .messages
+            .iter()
+            .map(serialize_message)
+            .collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = serde_json::json!({
             "model": model,
@@ -693,7 +773,11 @@ impl LLMProvider for OllamaProvider {
             .collect();
 
         let messages: Vec<serde_json::Value> =
-            request.messages.iter().map(serialize_message).collect();
+            request
+            .messages
+            .iter()
+            .map(serialize_message)
+            .collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = json!({
             "model": model,

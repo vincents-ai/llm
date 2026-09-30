@@ -38,8 +38,20 @@ pub struct GeminiProvider {
     client: reqwest::Client,
 }
 
-fn convert_message(msg: &ChatMessage) -> serde_json::Value {
-    match msg {
+/// Split a `data:` URL into its media type and payload.
+///
+/// The media type is everything before the first `;` or `,`: `image/jpeg;base64`
+/// is the `image/jpeg` type with a `base64` marker, and passing the whole
+/// segment through as a mime type is rejected by the API.
+fn data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    let mime_type = meta.split(';').next().unwrap_or(meta);
+    Some((mime_type.to_string(), payload.to_string()))
+}
+
+fn convert_message(msg: &ChatMessage) -> crate::error::Result<serde_json::Value> {
+    Ok(match msg {
         ChatMessage::Developer { content, .. } | ChatMessage::System { content, .. } => {
             // Gemini has one `systemInstruction`. A developer message lands
             // there, which is the only place it can go.
@@ -49,10 +61,48 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
             })
         }
         ChatMessage::User { content, .. } => {
-            json!({
-                "role": "user",
-                "parts": [{"text": content}]
-            })
+            // Gemini's own vocabulary: a flat list of parts, with binary data as
+            // `inline_data` carrying a `mime_type`. Serializing the shared
+            // `ContentPart` verbatim sent `{"type": "image_url", ...}` -- the
+            // OpenAI spelling -- which this API rejects outright.
+            let mut parts = Vec::new();
+            match content {
+                MessageContent::Text(text) => parts.push(json!({"text": text})),
+                MessageContent::Parts(items) => {
+                    for part in items {
+                        match part {
+                            crate::types::ContentPart::Text { text } => {
+                                parts.push(json!({"text": text}))
+                            }
+                            crate::types::ContentPart::ImageUrl { url, .. } => {
+                                let (mime_type, data) = data_url(url).ok_or_else(|| {
+                                    LLMError::UnsupportedFeature {
+                                        feature: format!(
+                                            "a remote image URL (Gemini takes inline data): {url}"
+                                        ),
+                                        model: String::new(),
+                                    }
+                                })?;
+                                parts.push(json!({"inline_data": {
+                                    "mime_type": mime_type, "data": data}}));
+                            }
+                            crate::types::ContentPart::InputAudio { .. } => {
+                                return Err(LLMError::UnsupportedFeature {
+                                    feature: "input_audio".to_string(),
+                                    model: String::new(),
+                                })
+                            }
+                            crate::types::ContentPart::File { .. } => {
+                                return Err(LLMError::UnsupportedFeature {
+                                    feature: "file content parts".to_string(),
+                                    model: String::new(),
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            json!({"role": "user", "parts": parts})
         }
         ChatMessage::Assistant {
             content,
@@ -112,8 +162,9 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
                 }]
             })
         }
-    }
+    })
 }
+
 
 fn parse_response_parts(parts: &[serde_json::Value]) -> (Option<String>, Vec<ToolCall>) {
     let mut text_parts = Vec::new();
@@ -192,13 +243,28 @@ impl GeminiProvider {
         })
     }
 
+    /// The API root, honouring `base_url`.
+    ///
+    /// Previously `send_request` and `create_stream` hardcoded
+    /// `generativelanguage.googleapis.com` while only `fetch_models_live`
+    /// read `base_url`. So a configured proxy, a regional endpoint or a test
+    /// mock was silently ignored and requests went to production Google -- the
+    /// worst possible failure mode, because everything appears to work.
+    fn api_root(&self) -> &str {
+        self.config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
+    }
+
     fn get_base_url(&self) -> Result<String> {
         let model = self.config.default_model.as_deref().ok_or_else(|| LLMError::ConfigurationError {
             message: "No model configured for GeminiProvider — set default_model in GeminiConfig or pass a model in the request".to_string(),
             field: Some("default_model".to_string()),
         })?;
         Ok(format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            "{}/models/{}:generateContent",
+            self.api_root().trim_end_matches('/'),
             model
         ))
     }
@@ -216,8 +282,10 @@ impl GeminiProvider {
         body: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, self.config.api_key
+            "{}/models/{}:generateContent?key={}",
+            self.api_root().trim_end_matches('/'),
+            model,
+            self.config.api_key
         );
 
         let response = self
@@ -329,8 +397,8 @@ impl GeminiProvider {
         messages: &[ChatMessage],
         _model: &str,
         request: &ChatCompletionRequest,
-    ) -> serde_json::Value {
-        let contents: Vec<serde_json::Value> = messages.iter().map(convert_message).collect();
+    ) -> crate::error::Result<serde_json::Value> {
+        let contents: Vec<serde_json::Value> = messages.iter().map(convert_message).collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = json!({
             "contents": contents,
@@ -348,16 +416,12 @@ impl GeminiProvider {
             }
         }
 
-        body
+        Ok(body)
     }
 
     /// Fetch models from Google's Gemini API.
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
-        let base = self
-            .config
-            .base_url
-            .as_deref()
-            .unwrap_or("https://generativelanguage.googleapis.com/v1beta");
+        let base = self.api_root();
         let url = if self.config.api_key.is_empty() {
             format!("{}/models", base)
         } else {
@@ -477,7 +541,7 @@ impl LLMProvider for GeminiProvider {
             request.model.clone()
         };
 
-        let body = Self::build_body(&request.messages, &model, &request);
+        let body = Self::build_body(&request.messages, &model, &request)?;
 
         let json = self.send_request(&model, body).await?;
         Ok(Self::build_response(json, model))
@@ -494,7 +558,7 @@ impl LLMProvider for GeminiProvider {
         };
 
         let contents: Vec<serde_json::Value> =
-            request.messages.iter().map(convert_message).collect();
+            request.messages.iter().map(convert_message).collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = serde_json::json!({
             "contents": contents,
@@ -514,8 +578,10 @@ impl LLMProvider for GeminiProvider {
         }
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, self.config.api_key
+            "{}/models/{}:generateContent?key={}",
+            self.api_root().trim_end_matches('/'),
+            model,
+            self.config.api_key
         );
 
         let response = self
@@ -666,7 +732,7 @@ impl LLMProvider for GeminiProvider {
         let contents: Vec<serde_json::Value> = non_system_messages
             .iter()
             .map(|m| convert_message(m))
-            .collect();
+            .collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut body = json!({
             "contents": contents,
