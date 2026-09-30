@@ -272,3 +272,128 @@ async fn a_multimodal_message_reaches_the_wire_through_the_provider() {
     assert_eq!(body["messages"][1]["content"][0]["type"], "text");
     assert_eq!(body["messages"][1]["content"][1]["image_url"]["detail"], "low");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Usage detail and provider metadata (§47, §48, §49)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn reasoning_tokens_are_read_from_the_nested_detail_object() {
+    // The detail lives at `completion_tokens_details.reasoning_tokens`. A flat
+    // read of `usage.reasoning_tokens` finds nothing, and a cost calculation
+    // built on `total_tokens` still looks plausible while being wrong.
+    let usage = vincents_llm::types::Usage::from_openai_json(&json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 500,
+        "total_tokens": 600,
+        "completion_tokens_details": {"reasoning_tokens": 460}
+    }));
+    assert_eq!(usage.reasoning_tokens, Some(460));
+    assert!(usage.has_token_details());
+    // Reasoning is a subset of completion, not an addition.
+    assert_eq!(usage.visible_completion_tokens(), 40);
+    assert_eq!(usage.total_tokens, 600);
+}
+
+#[test]
+fn cached_tokens_are_read_from_the_nested_detail_object() {
+    let usage = vincents_llm::types::Usage::from_openai_json(&json!({
+        "prompt_tokens": 10_000,
+        "completion_tokens": 50,
+        "total_tokens": 10_050,
+        "prompt_tokens_details": {"cached_tokens": 9_000}
+    }));
+    assert_eq!(usage.cached_tokens, Some(9_000));
+    assert_eq!(usage.uncached_prompt_tokens(), 1_000);
+}
+
+#[test]
+fn absent_token_detail_is_not_zero() {
+    // "The provider did not report it" and "the provider reported zero" are
+    // different facts, and only one of them is safe to bill on.
+    let usage = vincents_llm::types::Usage::from_openai_json(&json!({
+        "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15
+    }));
+    assert_eq!(usage.reasoning_tokens, None);
+    assert_eq!(usage.cached_tokens, None);
+    assert!(!usage.has_token_details());
+    // And the derived helpers behave as "nothing known" rather than inventing it.
+    assert_eq!(usage.uncached_prompt_tokens(), 10);
+    assert_eq!(usage.visible_completion_tokens(), 5);
+}
+
+#[test]
+fn detailed_cost_prices_cache_and_reasoning_separately() {
+    let usage = vincents_llm::types::Usage::from_openai_json(&json!({
+        "prompt_tokens": 10_000, "completion_tokens": 500, "total_tokens": 10_500,
+        "prompt_tokens_details": {"cached_tokens": 9_000},
+        "completion_tokens_details": {"reasoning_tokens": 400}
+    }));
+    let cost = usage.calculate_detailed_cost(
+        /* uncached input /1k */ 0.003,
+        /* cached input   /1k */ 0.0003,
+        /* output         /1k */ 0.015,
+        /* reasoning      /1k */ 0.015,
+    );
+    // 1_000 uncached * .003 + 9_000 cached * .0003 + 400 reasoning * .015
+    //   + 100 visible * .015, all / 1000
+    let expected = (1_000.0 * 0.003 + 9_000.0 * 0.0003 + 400.0 * 0.015 + 100.0 * 0.015) / 1000.0;
+    assert!((cost - expected).abs() < 1e-12, "{cost} != {expected}");
+}
+
+#[test]
+fn a_missing_total_is_derived_rather_than_reported_as_zero() {
+    let usage = vincents_llm::types::Usage::from_openai_json(&json!({
+        "prompt_tokens": 7, "completion_tokens": 3
+    }));
+    assert_eq!(usage.total_tokens, 10);
+}
+
+#[tokio::test]
+async fn provider_metadata_is_captured_without_parsing_headers() {
+    // §49: the caller should not have to read HTTP headers to learn which
+    // provider actually served the request.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "id": "chatcmpl-meta", "object": "chat.completion", "created": 99,
+                    "model": "gpt-4o-2024-08-06",
+                    "system_fingerprint": "fp_44709d6fcb",
+                    "service_tier": "scale",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+                .insert_header("x-request-id", "req_abc123"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("request");
+
+    // The returned model is the provider's, not the one requested: a routing
+    // layer may have served a snapshot.
+    assert_eq!(response.model, "gpt-4o-2024-08-06");
+    assert_eq!(response.system_fingerprint.as_deref(), Some("fp_44709d6fcb"));
+}

@@ -501,10 +501,17 @@ impl LLMProvider for OllamaProvider {
 
         let estimated_completion_tokens = content.len() / 4;
 
+        // `estimated_*`: Ollama's endpoint does not report token counts for
+        // this path, so these are computed. The `None` details say so; a caller
+        // that bills from this needs to know it is an estimate, which is why
+        // `Usage` carries no `estimated` flag of its own -- the wrapper does.
         let usage = Some(Usage {
             prompt_tokens: estimated_prompt_tokens,
             completion_tokens: estimated_completion_tokens as u32,
             total_tokens: estimated_prompt_tokens + estimated_completion_tokens as u32,
+            reasoning_tokens: None,
+            cached_tokens: None,
+            cache_write_tokens: None,
         });
 
         let id = format!("ollama_{}", chrono::Utc::now().timestamp_millis());
@@ -775,10 +782,17 @@ impl LLMProvider for OllamaProvider {
             ChatMessage::assistant(&content)
         };
 
+        // `estimated_*`: Ollama's endpoint does not report token counts for
+        // this path, so these are computed. The `None` details say so; a caller
+        // that bills from this needs to know it is an estimate, which is why
+        // `Usage` carries no `estimated` flag of its own -- the wrapper does.
         let usage = Some(Usage {
             prompt_tokens: estimated_prompt_tokens,
             completion_tokens: estimated_completion_tokens as u32,
             total_tokens: estimated_prompt_tokens + estimated_completion_tokens as u32,
+            reasoning_tokens: None,
+            cached_tokens: None,
+            cache_write_tokens: None,
         });
 
         let id = format!("ollama_{}", chrono::Utc::now().timestamp_millis());

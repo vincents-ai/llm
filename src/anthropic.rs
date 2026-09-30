@@ -333,11 +333,18 @@ impl AnthropicProvider {
             logprobs: None,
         };
 
+        // Anthropic renames the fields *and* nests the cache detail, so this
+        // dialect gets its own mapping rather than the OpenAI one. `cache_read`
+        // is Anthropic's cached-token count; `cache_creation` is the
+        // cache-write count OpenAI does not report at all.
         let usage = json["usage"].as_object().map(|u| Usage {
             prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
             completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
             total_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32
                 + u["output_tokens"].as_u64().unwrap_or(0) as u32,
+            reasoning_tokens: None,
+            cached_tokens: u["cache_read_input_tokens"].as_u64().map(|v| v as u32),
+            cache_write_tokens: u["cache_creation_input_tokens"].as_u64().map(|v| v as u32),
         });
 
         Ok(ChatCompletionResponse {

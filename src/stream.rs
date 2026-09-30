@@ -102,13 +102,9 @@ pub fn parse_sse_stream(
                 }
 
                 if let Some(usage) = event.get("usage").filter(|u| !u.is_null()) {
-                    yield Ok(ChatStreamEvent::Usage(Usage {
-                        prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                        completion_tokens: usage["completion_tokens"]
-                            .as_u64()
-                            .unwrap_or(0) as u32,
-                        total_tokens: usage["total_tokens"].as_u64().unwrap_or(0) as u32,
-                    }));
+                    // The same parser as the non-streaming path, so a stream
+                    // and a request report identical token detail.
+                    yield Ok(ChatStreamEvent::Usage(Usage::from_openai_json(usage)));
                 }
 
                 let Some(choices) = event["choices"].as_array() else {

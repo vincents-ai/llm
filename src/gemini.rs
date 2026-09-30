@@ -304,6 +304,11 @@ impl GeminiProvider {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                // Neither provider reports token detail, which is recorded as
+                // "not reported" rather than as zero -- see `Usage::has_token_details`.
+                reasoning_tokens: None,
+                cached_tokens: None,
+                cache_write_tokens: None,
             }
         });
 

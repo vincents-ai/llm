@@ -658,6 +658,56 @@ pub struct Usage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub total_tokens: u32,
+
+    /// Output tokens spent on reasoning, not visible as final text.
+    ///
+    /// Reported by reasoning models inside
+    /// `completion_tokens_details.reasoning_tokens`. It is a *subset* of
+    /// `completion_tokens`, not an addition — subtracting it from the total
+    /// gives the tokens that reached the caller as text.
+    ///
+    /// Exposed separately because it is the single largest driver of why a
+    /// cheap model is not cheap: a cost optimizer, a model router and a
+    /// System-2 escalation analysis all need it, and none of them can recover
+    /// it from `total_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+
+    /// Input tokens served from the provider's prompt cache.
+    ///
+    /// Also a subset of `prompt_tokens`. These are billed at a lower rate, so
+    /// collapsing all input tokens into one opaque number overstates cost and
+    /// makes prompt-cache effectiveness unmeasurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
+
+    /// Input tokens written to the cache this request, where the provider
+    /// reports it. Anthropic reports this; OpenAI does not, which is why it is
+    /// optional rather than zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+}
+
+impl Usage {
+    /// Input tokens that were *not* served from cache.
+    pub fn uncached_prompt_tokens(&self) -> u32 {
+        self.prompt_tokens.saturating_sub(self.cached_tokens.unwrap_or(0))
+    }
+
+    /// Output tokens that reached the caller as text.
+    pub fn visible_completion_tokens(&self) -> u32 {
+        self.completion_tokens
+            .saturating_sub(self.reasoning_tokens.unwrap_or(0))
+    }
+
+    /// Whether the provider reported the fine-grained details.
+    ///
+    /// `false` means "the provider did not say", which is different from
+    /// "the provider said zero". A caller that needs exact cache or reasoning
+    /// accounting must check this rather than reading an `Option::None` as 0.
+    pub fn has_token_details(&self) -> bool {
+        self.reasoning_tokens.is_some() || self.cached_tokens.is_some()
+    }
 }
 
 impl Usage {
@@ -668,12 +718,74 @@ impl Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            reasoning_tokens: None,
+            cached_tokens: None,
+            cache_write_tokens: None,
         }
     }
 
-    /// Calculate cost based on pricing
+    /// Parse the provider's `usage` object.
+    ///
+    /// One parser for the dialect. The fine-grained tokens live in *nested*
+    /// detail objects, and four hand-written copies of this match is how they
+    /// got dropped: reading `prompt_tokens` and `completion_tokens` is enough
+    /// for a cost calculation to look plausible while being wrong.
+    ///
+    /// Both `prompt_tokens_details` and `completion_tokens_details` are read
+    /// with snake_case keys, which is what the OpenAI Chat Completions API
+    /// sends.
+    pub fn from_openai_json(value: &serde_json::Value) -> Self {
+        let prompt = value["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let completion = value["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        let total = value["total_tokens"].as_u64().unwrap_or(0) as u32;
+        Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            // Some providers omit `total_tokens`; deriving it is not a guess,
+            // it is the definition.
+            total_tokens: if total == 0 { prompt + completion } else { total },
+            reasoning_tokens: value["completion_tokens_details"]["reasoning_tokens"].as_u64()
+                .map(|v| v as u32),
+            cached_tokens: value["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .map(|v| v as u32),
+            cache_write_tokens: value["cache_creation_input_tokens"].as_u64().map(|v| v as u32),
+        }
+    }
+
+    /// Calculate cost based on pricing.
+    ///
+    /// Charges for *all* input and output tokens, including cached and
+    /// reasoning ones. A cache- or reasoning-aware price needs
+    /// [`Usage::uncached_prompt_tokens`] and the reasoning count, because this
+    /// method is only correct for providers that price every token the same.
     pub fn calculate_cost(&self, input_cost: f64, output_cost: f64) -> f64 {
         (self.prompt_tokens as f64 * input_cost) + (self.completion_tokens as f64 * output_cost)
+    }
+
+    /// Cost with separate rates for cached, uncached and reasoning tokens.
+    ///
+    /// The rate that applies to reasoning tokens is a judgement call: providers
+    /// bill them as output, so that is the default here. A caller that knows
+    /// otherwise passes `reasoning_cost_per_1k` explicitly.
+    pub fn calculate_detailed_cost(
+        &self,
+        uncached_input_per_1k: f64,
+        cached_input_per_1k: f64,
+        output_per_1k: f64,
+        reasoning_per_1k: f64,
+    ) -> f64 {
+        let cached = self.cached_tokens.unwrap_or(0) as f64;
+        let uncached = self.uncached_prompt_tokens() as f64;
+        let reasoning = self.reasoning_tokens.unwrap_or(0) as f64;
+        // Reasoning is a subset of completion, so it is priced separately and
+        // removed from the visible completion before that is priced.
+        let visible = self.visible_completion_tokens() as f64;
+        (uncached * uncached_input_per_1k
+            + cached * cached_input_per_1k
+            + reasoning * reasoning_per_1k
+            + visible * output_per_1k)
+            / 1000.0
     }
 }
 

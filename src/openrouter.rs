@@ -768,11 +768,7 @@ impl LLMProvider for OpenRouterProvider {
             })
             .collect();
 
-        let usage = json["usage"].as_object().map(|u| Usage {
-            prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-        });
+        let usage = json["usage"].as_object().map(|u| Usage::from_openai_json(&serde_json::Value::Object(u.clone())));
 
         Ok(ChatCompletionResponse {
             id,
@@ -967,11 +963,7 @@ impl LLMProvider for OpenRouterProvider {
             })
             .collect();
 
-        let usage = json["usage"].as_object().map(|u| Usage {
-            prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-        });
+        let usage = json["usage"].as_object().map(|u| Usage::from_openai_json(&serde_json::Value::Object(u.clone())));
 
         Ok(ChatCompletionResponse {
             id,
