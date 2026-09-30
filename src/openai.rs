@@ -123,12 +123,20 @@ impl OpenAIProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // §50: preserve the provider's correlation handle. Without it a
+            // report about one specific failed call cannot be traced.
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let body = response.text().await.unwrap_or_default();
-            return Err(LLMError::HttpError {
-                message: format!("OpenAI API error: {status}"),
-                status_code: Some(status.as_u16()),
-                body: Some(body),
-            });
+            return Err(LLMError::from_provider_response(
+                "OpenAI",
+                status,
+                Some(body),
+                request_id,
+            ));
         }
 
         Ok((response, model))
@@ -218,12 +226,19 @@ impl OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            // Captured before the body is consumed.
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let body_text = response.text().await.ok();
-            return Err(LLMError::HttpError {
-                message: format!("OpenAI API error: {}", status),
-                status_code: Some(status.as_u16()),
-                body: body_text,
-            });
+            return Err(LLMError::from_provider_response(
+                "OpenAI",
+                status,
+                body_text,
+                request_id,
+            ));
         }
 
         response

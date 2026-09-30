@@ -171,6 +171,67 @@ pub enum LLMError {
     /// *partial*: acting on it as if complete is the failure mode.
     #[error("Stream interrupted: {message}")]
     StreamInterrupted { message: String },
+
+    /// The provider does not implement the feature the request needs.
+    ///
+    /// Distinct from a rejected *parameter*: this is a capability the provider
+    /// has not got, not a value it disliked. A caller can retry on a different
+    /// model; a caller that sees this for a bad parameter value would not.
+    #[error("Unsupported feature: {feature} (model {model:?})")]
+    UnsupportedFeature { feature: String, model: String },
+
+    /// A parameter the provider does not recognise.
+    ///
+    /// The name is preserved verbatim: the caller needs to know *which*
+    /// parameter, and providers spell their unknowns differently.
+    #[error("Unsupported parameter: {parameter}")]
+    UnsupportedParameter { parameter: String },
+
+    /// Two individually valid parameters that cannot both be set.
+    ///
+    /// Rejected locally, before any network I/O, because the provider's own
+    /// error for this is a generic 400 that does not say which pair conflicted.
+    #[error("Invalid parameter combination: {message}")]
+    InvalidParameterCombination { message: String },
+
+    /// The provider understood the parameter and refused this value.
+    ///
+    /// Not the same as `UnsupportedParameter`: retrying or dropping the
+    /// parameter will not help, the caller must change the value.
+    #[error("Provider rejected parameter {parameter}: {reason}")]
+    ProviderRejectedParameter { parameter: String, reason: String },
+
+    /// The stream did not follow the protocol.
+    ///
+    /// Kept separate from `SerializationError` (§50): a malformed SSE frame is
+    /// a stream-protocol failure, and collapsing it into "could not parse JSON"
+    /// loses the fact that the *stream* was wrong, not the document.
+    #[error("Stream protocol error: {message}")]
+    StreamProtocolError { message: String },
+
+    /// The response completed but never reported usage.
+    ///
+    /// A billing-relevant state, not a transport failure. The answer may be
+    /// perfectly good; what is missing is the accounting.
+    #[error("Incomplete usage: {message}")]
+    IncompleteUsage { message: String },
+
+    /// A provider failure, with everything needed to diagnose it.
+    ///
+    /// `request_id` is the provider's correlation handle. Without it a support
+    /// conversation about a specific failed call is not possible, which is why
+    /// it is preserved rather than logged and dropped.
+    // The request id is in `Display`, not only in `user_message`: a log line
+    // that carries an error but not its correlation handle cannot be acted on,
+    // and `{}` on an error is how most errors reach a log.
+    #[error("{provider} error {status}: {message} (request {request_id:?})")]
+    ProviderRequest {
+        provider: String,
+        status: u16,
+        message: String,
+        body: Option<String>,
+        request_id: Option<String>,
+    },
 }
 
 impl LLMError {
@@ -192,6 +253,21 @@ impl LLMError {
             // A truncated response is worth retrying: the request was
             // understood, and the failure was in transit.
             LLMError::StreamInterrupted { .. } => true,
+            // A protocol violation is the provider's fault and may be
+            // transient, but the same violation will recur on retry against
+            // the same endpoint, so it is *not* retryable -- retrying turns one
+            // bad response into several.
+            LLMError::StreamProtocolError { .. } => false,
+            // Nothing wrong with the request; there is simply nothing to bill.
+            LLMError::IncompleteUsage { .. } => false,
+            LLMError::ProviderRequest { status, .. } => {
+                matches!(status, 408 | 409 | 429 | 500..=599)
+            }
+            // The caller asked for something this provider cannot do.
+            LLMError::UnsupportedFeature { .. } => false,
+            LLMError::UnsupportedParameter { .. } => false,
+            LLMError::InvalidParameterCombination { .. } => false,
+            LLMError::ProviderRejectedParameter { .. } => false,
             LLMError::ContentFilterError { .. } => false,
             LLMError::UnsupportedError { .. } => false,
             LLMError::ContextLengthExceeded { .. } => false,
@@ -245,6 +321,42 @@ impl LLMError {
                     "Model '{}' is not available. Please try a different model.",
                     model
                 )
+            }
+            LLMError::UnsupportedFeature { feature, model } => {
+                format!(
+                    "{model} does not support {feature}. Use a model that does, or drop \
+                     the feature."
+                )
+            }
+            LLMError::UnsupportedParameter { parameter } => {
+                format!("The provider does not recognise the parameter '{parameter}'.")
+            }
+            LLMError::InvalidParameterCombination { message } => {
+                format!("Conflicting request parameters: {message}")
+            }
+            LLMError::ProviderRejectedParameter { parameter, reason } => {
+                format!("The provider rejected '{parameter}': {reason}")
+            }
+            LLMError::StreamProtocolError { message } => {
+                format!("The response stream was malformed: {message}")
+            }
+            LLMError::IncompleteUsage { message } => {
+                format!(
+                    "The response is complete but reported no usage ({message}). \
+                     The answer is usable; the cost is not yet known."
+                )
+            }
+            LLMError::ProviderRequest {
+                provider,
+                status,
+                request_id,
+                ..
+            } => {
+                let mut text = format!("{provider} returned HTTP {status}");
+                if let Some(id) = request_id {
+                    text.push_str(&format!(" (request {id})"));
+                }
+                text
             }
             LLMError::StreamInterrupted { message } => {
                 format!(
@@ -322,6 +434,103 @@ impl From<&LLMError> for ErrorCategory {
             LLMError::UnsupportedError { .. } => Self::Unsupported,
             LLMError::QuotaExceeded { .. } => Self::Quota,
             _ => Self::Other,
+        }
+    }
+}
+
+impl LLMError {
+    /// Classify a provider's HTTP failure.
+    ///
+    /// One mapper for every provider, because the classification is a property
+    /// of the protocol's error format and not of which provider produced it.
+    /// Handlers that each did this inline is how a 400 naming a parameter came
+    /// to be reported as `HttpError` and lost the parameter's name.
+    ///
+    /// The provider's own error body is preferred over our summary, and the
+    /// `request_id` header is preserved: without it, a report about one specific
+    /// failed call cannot be traced to the provider's logs.
+    pub fn from_provider_response(
+        provider: &str,
+        status: reqwest::StatusCode,
+        body: Option<String>,
+        request_id: Option<String>,
+    ) -> Self {
+        let status_code = status.as_u16();
+        let raw = body.clone().unwrap_or_default();
+
+        // Pull the provider's own error type out of its JSON body, when it has
+        // one. The shape differs per provider, so several are tried rather than
+        // one being assumed.
+        let extracted = serde_json::from_str::<serde_json::Value>(&raw).ok().and_then(|json| {
+            let error = json.get("error")?;
+            let kind = error
+                .get("type")
+                .or_else(|| error.get("code"))
+                .and_then(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                });
+            let message = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let param = error
+                .get("param")
+                .or_else(|| error.get("parameter"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Some((kind, message, param))
+        });
+        let (kind, message, param) = match extracted {
+            Some((kind, message, param)) => (kind, message, param),
+            None => (None, None, None),
+        };
+        let message = message.unwrap_or_else(|| {
+            if raw.trim().is_empty() {
+                format!("{provider} returned HTTP {status_code} with no body")
+            } else {
+                raw.clone()
+            }
+        });
+
+        match status_code {
+            401 | 403 => LLMError::AuthenticationError { message, retry_after: None },
+            404 if kind.as_deref() == Some("model_not_found") => {
+                LLMError::ModelNotAvailable { model: message, available_models: vec![] }
+            }
+            404 => LLMError::ModelNotAvailable { model: message, available_models: vec![] },
+            413 | 429 if status_code == 429 => LLMError::RateLimitError {
+                message,
+                retry_after: None,
+                limit: None,
+            },
+            400 | 422 => {
+                // A rejected *parameter* is not a rejected request. Reporting it
+                // as a generic 400 loses the parameter's name, which is the only
+                // actionable part.
+                match param {
+                    Some(parameter) => LLMError::ProviderRejectedParameter {
+                        parameter,
+                        reason: message,
+                    },
+                    None => LLMError::InvalidRequestError {
+                        message,
+                        // The parameter name, when the provider gave one. Kept
+                        // here as well so a caller matching the older variant
+                        // still has it.
+                        param: None,
+                        code: None,
+                    },
+                }
+            }
+            _ => LLMError::ProviderRequest {
+                provider: provider.to_string(),
+                status: status_code,
+                message,
+                body,
+                request_id,
+            },
         }
     }
 }

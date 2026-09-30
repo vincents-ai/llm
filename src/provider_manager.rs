@@ -383,6 +383,18 @@ fn is_breaker_failure(error: &LLMError) -> bool {
         // A truncated response is a transport failure, not a bad request, and
         // is worth failing over.
         LLMError::StreamInterrupted { .. } => true,
+        LLMError::ProviderRequest { status, .. } => {
+            matches!(status, 408 | 409 | 429 | 500..=599)
+        }
+        // Not the provider's operational health: these are properties of the
+        // request, and failing over would hide a misconfiguration behind a
+        // provider that happens to accept it.
+        LLMError::StreamProtocolError { .. } => false,
+        LLMError::IncompleteUsage { .. } => false,
+        LLMError::UnsupportedFeature { .. } => false,
+        LLMError::UnsupportedParameter { .. } => false,
+        LLMError::InvalidParameterCombination { .. } => false,
+        LLMError::ProviderRejectedParameter { .. } => false,
         // Non-retryable — don't penalise
         LLMError::AuthenticationError { .. } => false,
         LLMError::ModelNotAvailable { .. } => false,
