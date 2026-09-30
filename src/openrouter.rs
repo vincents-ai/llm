@@ -742,9 +742,17 @@ impl LLMProvider for OpenRouterProvider {
                 let role = msg["role"].as_str().unwrap_or("assistant");
                 let content = msg["content"].as_str().unwrap_or("");
 
+                // `developer` is accepted back as itself. Folding it into
+                // `system` would lose which one the provider treated as
+                // higher precedence, which is exactly the information a
+                // debugging transcript needs.
                 let message = match role {
+                    "developer" => ChatMessage::Developer {
+                        content: content.to_string().into(),
+                        name: None,
+                    },
                     "system" => ChatMessage::System {
-                        content: content.to_string(),
+                        content: content.to_string().into(),
                         name: None,
                     },
                     "user" => ChatMessage::user(content),
@@ -828,78 +836,14 @@ impl LLMProvider for OpenRouterProvider {
             })
             .collect();
 
+        // The canonical serializer. This was the *fourth* hand-written copy of
+        // the same match -- the other three were replaced in an earlier commit
+        // for exactly this reason, and it survived because it sat in the
+        // tool-call path rather than the text path.
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
-            .map(|msg| match msg {
-                ChatMessage::System { content, name } => {
-                    let mut obj = json!({"role": "system", "content": content});
-                    if let Some(n) = name {
-                        obj["name"] = json!(n);
-                    }
-                    obj
-                }
-                ChatMessage::User { content, name } => {
-                    let mut obj = json!({"role": "user", "content": content});
-                    if let Some(n) = name {
-                        obj["name"] = json!(n);
-                    }
-                    obj
-                }
-                ChatMessage::Assistant {
-                    content,
-                    tool_calls,
-                    name,
-                } => {
-                    let mut obj = json!({"role": "assistant"});
-                    if let Some(c) = content {
-                        obj["content"] = json!(c);
-                    } else {
-                        obj["content"] = serde_json::Value::Null;
-                    }
-                    if let Some(n) = name {
-                        obj["name"] = json!(n);
-                    }
-                    if let Some(tcs) = tool_calls {
-                        if !tcs.is_empty() {
-                            let or_tcs: Vec<serde_json::Value> = tcs
-                                .iter()
-                                .filter_map(|tc| {
-                                    if let ToolCall::Function(FunctionCall::Custom(c)) = tc {
-                                        Some(json!({
-                                            "id": c.id.as_deref().unwrap_or(""),
-                                            "type": "function",
-                                            "function": {
-                                                "name": c.name,
-                                                "arguments": c.arguments,
-                                            }
-                                        }))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            if !or_tcs.is_empty() {
-                                obj["tool_calls"] = json!(or_tcs);
-                            }
-                        }
-                    }
-                    obj
-                }
-                ChatMessage::Tool {
-                    tool_call_id,
-                    content,
-                } => {
-                    json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": content,
-                    })
-                }
-                ChatMessage::Function { name, arguments } => {
-                    json!({"role": "function", "name": name, "content": arguments})
-                }
-            })
+            .map(ChatMessage::to_openai_json)
             .collect();
 
         let extensions = self.extensions_for(&request);
@@ -1013,7 +957,7 @@ impl LLMProvider for OpenRouterProvider {
                 Choice {
                     index: idx as u32,
                     message: ChatMessage::Assistant {
-                        content,
+                        content: content.map(MessageContent::Text),
                         tool_calls,
                         name: None,
                     },

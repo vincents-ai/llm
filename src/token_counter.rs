@@ -96,6 +96,7 @@ impl TokenCounter {
             total += self.count_tokens(content, model)?;
 
             let role_str = match message.role() {
+                crate::types::MessageRole::Developer => "developer",
                 crate::types::MessageRole::System => "system",
                 crate::types::MessageRole::User => "user",
                 crate::types::MessageRole::Assistant => "assistant",

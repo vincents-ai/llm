@@ -109,11 +109,17 @@ impl AnthropicProvider {
 
         for msg in messages {
             match msg {
-                ChatMessage::System { content, .. } => {
-                    // Merge system prompts
+                ChatMessage::Developer { content, .. }
+                | ChatMessage::System { content, .. } => {
+                    // Merge prompts. Anthropic has one `system` field and it is
+                    // a string, so a developer message lands there too -- the
+                    // only place it can go. A multimodal system prompt has no
+                    // representation here and is reduced to its text rather
+                    // than silently dropped.
+                    let text = content.as_text().unwrap_or_default().to_string();
                     system_value = Some(match system_value.take() {
-                        Some(existing) => format!("{}\n\n{}", existing, content),
-                        None => content.clone(),
+                        Some(existing) => format!("{}\n\n{}", existing, text),
+                        None => text,
                     });
                 }
                 ChatMessage::User { content, .. } => {
@@ -138,7 +144,7 @@ impl AnthropicProvider {
                     if let Some(calls) = tool_calls {
                         if !calls.is_empty() {
                             let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-                            if let Some(text) = content {
+                            if let Some(MessageContent::Text(text)) = content {
                                 if !text.is_empty() {
                                     content_blocks.push(json!({"type": "text", "text": text}));
                                 }
@@ -181,7 +187,10 @@ impl AnthropicProvider {
                             continue;
                         }
                     }
-                    let text = content.as_deref().unwrap_or("");
+                    let text = content
+                        .as_ref()
+                        .and_then(MessageContent::as_text)
+                        .unwrap_or("");
                     anthropic_messages.push(json!({
                         "role": "assistant",
                         "content": text
@@ -308,7 +317,7 @@ impl AnthropicProvider {
                 content: if text_parts.is_empty() {
                     None
                 } else {
-                    Some(text_parts.join(""))
+                    Some(MessageContent::Text(text_parts.join("")))
                 },
                 tool_calls: Some(tool_calls),
                 name: None,

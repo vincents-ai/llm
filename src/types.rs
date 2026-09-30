@@ -13,6 +13,9 @@ pub enum SortOrder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
+    /// Application-authored instructions. Distinct from `System`; see
+    /// [`ChatMessage::Developer`].
+    Developer,
     System,
     User,
     Assistant,
@@ -20,14 +23,266 @@ pub enum MessageRole {
     Tool,
 }
 
+/// How much detail a vision model should spend on an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    /// Let the provider decide.
+    Auto,
+    Low,
+    High,
+}
+
+/// The container format of inline audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioFormat {
+    Wav,
+    Mp3,
+    Flac,
+    Opus,
+    Pcm16,
+}
+
+/// Serialize content, falling back to `null` when it cannot be expressed.
+///
+/// `to_openai_json` is infallible because the rest of the crate, including the
+/// stored-session format, depends on that. A construction mistake must not
+/// panic a decode path, so it degrades to `null` here and is reported by
+/// `try_to_openai_json`.
+fn content_json_or_null(content: &MessageContent) -> serde_json::Value {
+    content.to_openai_json().unwrap_or(serde_json::Value::Null)
+}
+
+/// One piece of a multimodal message.
+///
+/// A typed enum rather than a JSON blob because the brief's point is that these
+/// are *not* ad-hoc: `detail`, `format` and the `file_id`/`file_data`
+/// alternatives are protocol concepts, and a caller assembling them as raw JSON
+/// cannot discover them. Keeping them typed also keeps this crate's
+/// conformance tests able to assert on them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    /// Base64 audio. `data` is the encoded payload without a data-URL prefix.
+    InputAudio {
+        data: String,
+        format: AudioFormat,
+    },
+    /// A provider-hosted file, by id, or inline, by data.
+    File {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+}
+
+/// Message content: plain text, or an ordered list of typed parts.
+///
+/// `Text` is a distinct variant, not a `Parts` of one, because a text-only
+/// message serializes to a bare JSON string. Collapsing the two would change
+/// the wire shape of essentially every existing request in the ecosystem for no
+/// reason, and `content: "hi"` and `content: [{"type":"text",...}]` are not
+/// equally supported across providers.
+///
+/// The variants are checked at serialization rather than trusted: a `Parts` list
+/// that is empty, or that contains a part some role cannot carry, is a caller
+/// error worth reporting rather than sending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        MessageContent::Text(String::new())
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(value: String) -> Self {
+        MessageContent::Text(value)
+    }
+}
+
+impl From<&String> for MessageContent {
+    fn from(value: &String) -> Self {
+        MessageContent::Text(value.clone())
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(value: &str) -> Self {
+        MessageContent::Text(value.to_string())
+    }
+}
+
+impl From<Vec<ContentPart>> for MessageContent {
+    fn from(value: Vec<ContentPart>) -> Self {
+        MessageContent::Parts(value)
+    }
+}
+
+impl MessageContent {
+    /// The text, when the content is text.
+    ///
+    /// `None` for multimodal content rather than a concatenation: joining the
+    /// text parts of an image-and-text message into one string is a guess about
+    /// what the caller meant, and a lossy one.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(text) => Some(text),
+            MessageContent::Parts(_) => None,
+        }
+    }
+
+    /// The parts, or a single text part when the content is text.
+    pub fn parts(&self) -> Vec<ContentPart> {
+        match self {
+            MessageContent::Text(text) => vec![ContentPart::Text { text: text.clone() }],
+            MessageContent::Parts(parts) => parts.clone(),
+        }
+    }
+
+    /// Whether the content carries anything beyond text.
+    pub fn is_multimodal(&self) -> bool {
+        matches!(self, MessageContent::Parts(parts)
+            if parts.iter().any(|part| !matches!(part, ContentPart::Text { .. })))
+    }
+
+    /// The canonical wire form.
+    ///
+    /// A bare string for text, an array for parts, matching what providers
+    /// accept. `Err` rather than a lossy fallback for an empty part list, which
+    /// is a construction mistake and would otherwise serialize to `"content":
+    /// []` and be rejected opaquely by the provider.
+    pub fn to_openai_json(&self) -> crate::error::Result<serde_json::Value> {
+        use serde_json::Value;
+        match self {
+            MessageContent::Text(text) => Ok(Value::String(text.clone())),
+            MessageContent::Parts(parts) => {
+                if parts.is_empty() {
+                    return Err(crate::error::LLMError::SerializationError {
+                        message: "message content has an empty parts list".to_string(),
+                        context: Some(
+                            "use MessageContent::Text for a message with no content".to_string(),
+                        ),
+                    });
+                }
+                let serialized = parts
+                    .iter()
+                    .map(serialize_content_part)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Array(serialized))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for MessageContent {
+    /// The text, for the common case.
+    ///
+    /// A multimodal message prints its text parts, separated, because `Display`
+    /// has nowhere to put an image. It is for logs and diagnostics, not for
+    /// building requests -- `to_openai_json` is the wire path.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageContent::Text(text) => formatter.write_str(text),
+            MessageContent::Parts(parts) => {
+                let text: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                formatter.write_str(&text.join("\n"))
+            }
+        }
+    }
+}
+
+fn serialize_content_part(part: &ContentPart) -> crate::error::Result<serde_json::Value> {
+    use serde_json::{json, Value};
+    Ok(match part {
+        ContentPart::Text { text } => json!({ "type": "text", "text": text }),
+        ContentPart::ImageUrl { url, detail } => {
+            // The nesting matters: `detail` lives *inside* `image_url`, so a
+            // flat `{"type":"image_url","url":...,"detail":...}` is rejected.
+            let inner = match detail {
+                Some(detail) => json!({ "url": url, "detail": detail }),
+                None => json!({ "url": url }),
+            };
+            json!({ "type": "image_url", "image_url": inner })
+        }
+        ContentPart::InputAudio { data, format } => {
+            let inner = json!({ "data": data, "format": format });
+            json!({ "type": "input_audio", "input_audio": inner })
+        }
+        ContentPart::File {
+            file_id,
+            file_data,
+            filename,
+        } => {
+            if file_id.is_none() && file_data.is_none() {
+                return Err(crate::error::LLMError::SerializationError {
+                    message: "a file content part needs either file_id or file_data".to_string(),
+                    context: Some(
+                        "a part with neither uploads nothing and references nothing".to_string(),
+                    ),
+                });
+            }
+            let mut inner = serde_json::Map::new();
+            if let Some(file_id) = file_id {
+                inner.insert("file_id".into(), json!(file_id));
+            }
+            if let Some(file_data) = file_data {
+                inner.insert("file_data".into(), json!(file_data));
+            }
+            if let Some(filename) = filename {
+                inner.insert("filename".into(), json!(filename));
+            }
+            json!({ "type": "file", "file": Value::Object(inner) })
+        }
+    })
+}
+
 /// A chat message in a conversation
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatMessage {
+    /// Developer message: instructions from the application author.
+    ///
+    /// A distinct role, not an alias for `System`. On newer OpenAI models the
+    /// two are different protocol concepts with different precedence: a
+    /// `developer` message is authored code, a `system` message is operator
+    /// configuration, and the model resolves a conflict between them in
+    /// opposite directions. Folding one into the other would silently pick a
+    /// winner, so this variant never serializes as `system`.
+    #[serde(rename = "developer")]
+    Developer {
+        content: MessageContent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+
     /// System message that sets the behavior of the assistant
     #[serde(rename = "system")]
     System {
-        content: String,
+        content: MessageContent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
@@ -35,15 +290,19 @@ pub enum ChatMessage {
     /// User message providing input
     #[serde(rename = "user")]
     User {
-        content: String,
+        content: MessageContent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
 
     /// Assistant message (model response)
+    ///
+    /// `content` is `None` rather than empty for a turn that carries only tool
+    /// calls: the API distinguishes "no content" from "empty content", and the
+    /// distinction changes how the turn is billed and replayed.
     #[serde(rename = "assistant")]
     Assistant {
-        content: Option<String>,
+        content: Option<MessageContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +310,12 @@ pub enum ChatMessage {
     },
 
     /// Function call from the model
+    ///
+    /// Retained only for compatibility with conversations recorded against the
+    /// legacy single-function message. New tool flows use assistant `tool_calls`
+    /// plus `tool` results, which is what the brief asks for and what the
+    /// current API expects; this variant is not how new code should say
+    /// "the model called a function".
     #[serde(rename = "function")]
     Function { name: String, arguments: String },
 
@@ -58,13 +323,25 @@ pub enum ChatMessage {
     #[serde(rename = "tool")]
     Tool {
         tool_call_id: String,
-        content: String,
+        content: MessageContent,
     },
 }
 
 impl ChatMessage {
+    /// Create a developer message.
+    ///
+    /// Never collapses to `System`. If you want operator configuration, say
+    /// [`ChatMessage::system`]; if you want application-authored instructions,
+    /// say this. The distinction is the reason the variant exists.
+    pub fn developer(content: impl Into<MessageContent>) -> Self {
+        ChatMessage::Developer {
+            content: content.into(),
+            name: None,
+        }
+    }
+
     /// Create a system message (no cache control)
-    pub fn system(content: impl Into<String>) -> Self {
+    pub fn system(content: impl Into<MessageContent>) -> Self {
         ChatMessage::System {
             content: content.into(),
             name: None,
@@ -73,7 +350,7 @@ impl ChatMessage {
 
     /// Create a system message with cache control for prompt caching
     /// Note: cache control is now handled via ChatCompletionRequest::cache_system field
-    pub fn system_with_cache(content: impl Into<String>) -> Self {
+    pub fn system_with_cache(content: impl Into<MessageContent>) -> Self {
         ChatMessage::System {
             content: content.into(),
             name: None,
@@ -81,15 +358,23 @@ impl ChatMessage {
     }
 
     /// Create a user message
-    pub fn user(content: impl Into<String>) -> Self {
+    pub fn user(content: impl Into<MessageContent>) -> Self {
         ChatMessage::User {
             content: content.into(),
             name: None,
         }
     }
 
+    /// Create a user message from typed content parts.
+    pub fn user_parts(parts: impl Into<Vec<ContentPart>>) -> Self {
+        ChatMessage::User {
+            content: MessageContent::Parts(parts.into()),
+            name: None,
+        }
+    }
+
     /// Create an assistant message
-    pub fn assistant(content: impl Into<String>) -> Self {
+    pub fn assistant(content: impl Into<MessageContent>) -> Self {
         ChatMessage::Assistant {
             content: Some(content.into()),
             tool_calls: None,
@@ -97,18 +382,48 @@ impl ChatMessage {
         }
     }
 
-    /// Get the text content of a message
-    pub fn content(&self) -> Option<&str> {
-        match self {
-            ChatMessage::System { content, .. } => Some(content),
-            ChatMessage::User { content, .. } => Some(content),
-            ChatMessage::Assistant { content, .. } => content.as_deref(),
-            ChatMessage::Function { arguments, .. } => Some(arguments),
-            ChatMessage::Tool { content, .. } => Some(content),
+    /// An assistant turn that carries only tool calls.
+    ///
+    /// `content` is `None`, not empty: see [`ChatMessage::Assistant`].
+    pub fn assistant_with_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        ChatMessage::Assistant {
+            content: None,
+            tool_calls: Some(tool_calls),
+            name: None,
         }
     }
 
+    /// The message content.
+    ///
+    /// The legacy `function` variant has no `content` field -- the arguments
+    /// live under `arguments` -- so it is reported as `None` rather than
+    /// fabricating an empty text message that the caller might send onward.
+    pub fn message_content(&self) -> Option<&MessageContent> {
+        match self {
+            ChatMessage::Developer { content, .. }
+            | ChatMessage::System { content, .. }
+            | ChatMessage::User { content, .. }
+            | ChatMessage::Tool { content, .. } => Some(content),
+            ChatMessage::Assistant { content, .. } => content.as_ref(),
+            ChatMessage::Function { .. } => None,
+        }
+    }
+
+    /// The text content of a message, when it is text.
+    ///
+    /// `None` for a multimodal message. Use [`ChatMessage::message_content`] to
+    /// get the parts; this returns `None` rather than concatenating the text
+    /// parts of an image-and-text message, which would be a guess.
+    pub fn content(&self) -> Option<&str> {
+        self.message_content().and_then(MessageContent::as_text)
+    }
+
     /// Serialize this message into the OpenAI Chat Completions wire shape.
+    ///
+    /// Multimodal content is emitted as the canonical wire form; a content
+    /// shape the protocol cannot express (an empty parts list) falls back to
+    /// `null` rather than panicking, and is reported by
+    /// [`ChatMessage::try_to_openai_json`], which callers who care should use.
     ///
     /// One canonical serializer for the protocol, used by every provider that
     /// speaks it and by every request path. The duplication this replaces is
@@ -129,15 +444,29 @@ impl ChatMessage {
     pub fn to_openai_json(&self) -> serde_json::Value {
         use serde_json::{json, Value};
         match self {
+            ChatMessage::Developer { content, name } => {
+                // `developer`, always. A provider that does not implement the
+                // role will reject it, which is the correct outcome: silently
+                // demoting it to `system` would change which instruction wins a
+                // conflict.
+                let mut obj = json!({ "role": "developer" });
+                obj["content"] = content_json_or_null(content);
+                if let Some(name) = name {
+                    obj["name"] = json!(name);
+                }
+                obj
+            }
             ChatMessage::System { content, name } => {
-                let mut obj = json!({ "role": "system", "content": content });
+                let mut obj = json!({ "role": "system" });
+                obj["content"] = content_json_or_null(content);
                 if let Some(name) = name {
                     obj["name"] = json!(name);
                 }
                 obj
             }
             ChatMessage::User { content, name } => {
-                let mut obj = json!({ "role": "user", "content": content });
+                let mut obj = json!({ "role": "user" });
+                obj["content"] = content_json_or_null(content);
                 if let Some(name) = name {
                     obj["name"] = json!(name);
                 }
@@ -148,13 +477,14 @@ impl ChatMessage {
                 tool_calls,
                 name,
             } => {
-                let mut obj = json!({
-                    "role": "assistant",
-                    // `null` rather than an omitted key: the API distinguishes
-                    // "no content" from "content not supplied" for assistant
-                    // turns that carry only tool calls.
-                    "content": content.clone().map(Value::String).unwrap_or(Value::Null),
-                });
+                let mut obj = json!({ "role": "assistant" });
+                // `null` rather than an omitted key: the API distinguishes
+                // "no content" from "content not supplied" for assistant
+                // turns that carry only tool calls.
+                obj["content"] = match content {
+                    Some(content) => content_json_or_null(content),
+                    None => Value::Null,
+                };
                 if let Some(tool_calls) = tool_calls {
                     let serialized: Vec<Value> = tool_calls
                         .iter()
@@ -186,11 +516,9 @@ impl ChatMessage {
                 // links the result back to the call. Dropping it, or rewording
                 // the role to `user`, breaks the conversation rather than
                 // merely changing its shape.
-                json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                })
+                let mut obj = json!({ "role": "tool", "tool_call_id": tool_call_id });
+                obj["content"] = content_json_or_null(content);
+                obj
             }
         }
     }
@@ -198,6 +526,7 @@ impl ChatMessage {
     /// Get the role of the message
     pub fn role(&self) -> MessageRole {
         match self {
+            ChatMessage::Developer { .. } => MessageRole::Developer,
             ChatMessage::System { .. } => MessageRole::System,
             ChatMessage::User { .. } => MessageRole::User,
             ChatMessage::Assistant { .. } => MessageRole::Assistant,
@@ -1046,7 +1375,7 @@ impl ChatStreamEvent {
                 vec![ChoiceDelta {
                     index: *choice_index,
                     delta: Some(ChatMessage::Assistant {
-                        content: Some(text.clone()),
+                        content: Some(MessageContent::Text(text.clone())),
                         tool_calls: None,
                         name: None,
                     }),
@@ -1112,7 +1441,7 @@ impl ChatStreamEvent {
                 vec![ChoiceDelta {
                     index: *choice_index,
                     delta: Some(ChatMessage::Assistant {
-                        content: Some(delta.clone()),
+                        content: Some(MessageContent::Text(delta.clone())),
                         tool_calls: None,
                         name: None,
                     }),

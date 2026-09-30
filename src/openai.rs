@@ -182,6 +182,10 @@ impl OpenAIProvider {
 
         let tool_calls = tool_calls.filter(|t| !t.is_empty());
 
+        // Parsed from the wire as text. A provider can return multimodal parts
+        // in an assistant turn, but the common case is text, and guessing at
+        // which part is "the" text of a mixed reply would be a silent loss.
+        let content = content.map(MessageContent::Text);
         ChatMessage::Assistant {
             content,
             tool_calls,

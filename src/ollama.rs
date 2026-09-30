@@ -40,10 +40,15 @@ pub struct OllamaProvider {
 
 fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
     match msg {
-        ChatMessage::System { content, .. } => {
+        ChatMessage::Developer { content, .. } | ChatMessage::System { content, .. } => {
+            // Ollama has no `developer` role, so a developer message is sent as
+            // `system`. That is a real semantic collapse -- noted rather than
+            // hidden -- and it is why `ChatMessage::Developer` exists as a
+            // distinct variant: the difference survives in the request even
+            // where a particular provider cannot express it.
             json!({
                 "role": "system",
-                "content": content
+                "content": content.as_text().unwrap_or_default()
             })
         }
         ChatMessage::User { content, .. } => {
@@ -59,7 +64,10 @@ fn serialize_message(msg: &ChatMessage) -> serde_json::Value {
         } => {
             let mut obj = json!({
                 "role": "assistant",
-                "content": content.as_deref().unwrap_or("")
+                "content": content
+                    .as_ref()
+                    .and_then(MessageContent::as_text)
+                    .unwrap_or("")
             });
             if let Some(calls) = tool_calls {
                 let ollama_calls: Vec<serde_json::Value> = calls
@@ -758,7 +766,7 @@ impl LLMProvider for OllamaProvider {
                 content: if content.is_empty() {
                     None
                 } else {
-                    Some(content)
+                    Some(MessageContent::Text(content))
                 },
                 tool_calls: Some(calls),
                 name: None,

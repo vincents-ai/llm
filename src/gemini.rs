@@ -40,10 +40,12 @@ pub struct GeminiProvider {
 
 fn convert_message(msg: &ChatMessage) -> serde_json::Value {
     match msg {
-        ChatMessage::System { content, .. } => {
+        ChatMessage::Developer { content, .. } | ChatMessage::System { content, .. } => {
+            // Gemini has one `systemInstruction`. A developer message lands
+            // there, which is the only place it can go.
             json!({
                 "role": "system",
-                "parts": [{"text": content}]
+                "parts": [{"text": content.as_text().unwrap_or_default()}]
             })
         }
         ChatMessage::User { content, .. } => {
@@ -58,7 +60,7 @@ fn convert_message(msg: &ChatMessage) -> serde_json::Value {
             ..
         } => {
             let mut parts = Vec::new();
-            if let Some(text) = content {
+            if let Some(text) = content.as_ref().and_then(MessageContent::as_text) {
                 if !text.is_empty() {
                     parts.push(json!({"text": text}));
                 }
@@ -271,7 +273,7 @@ impl GeminiProvider {
 
                 let message = if !tool_calls.is_empty() {
                     ChatMessage::Assistant {
-                        content: text,
+                        content: text.map(MessageContent::Text),
                         tool_calls: Some(tool_calls),
                         name: None,
                     }
