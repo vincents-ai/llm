@@ -11,10 +11,193 @@ use std::pin::Pin;
 
 use crate::config::ProviderConfig;
 use crate::error::{LLMError, Result};
-use crate::provider::LLMProvider;
 use crate::types::*;
+use crate::provider::LLMProvider;
 use crate::CostEstimate;
 use crate::RateLimitStatus;
+
+// ── OpenRouter provider extensions ──────────────────────────────────────────
+//
+// These are provider-specific on purpose (§54). They are not on
+// `ChatCompletionRequest` because most of them mean nothing to OpenAI, and
+// putting thirty fields meaning something to exactly one provider on the
+// portable type is the shape the brief warns against.
+//
+// They are typed rather than raw, because routing and privacy settings in
+// particular must not be expressed as raw JSON keys: `provider.data_collection:
+// "deny"` and `"DENY"` are not the same request, and a typo in a string map is
+// indistinguishable from no setting at all.
+
+/// Whether an upstream provider may retain the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataCollectionPolicy {
+    Allow,
+    Deny,
+}
+
+/// How upstream providers should be ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenRouterSort {
+    Price,
+    Throughput,
+    Latency,
+}
+
+/// A price ceiling, in dollars per million tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterMaxPrice {
+    pub prompt: f64,
+    pub completion: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_reasoning: Option<f64>,
+}
+
+/// Upstream provider selection and privacy policy.
+///
+/// Belongs in the request body, not in a header: the legacy
+/// `OpenRouter-Router` header can only express an ordering. These settings
+/// decide where a user's code goes, so they are part of the request and are
+/// visible in a captured body.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterProviderRouting {
+    /// Provider preference order, most preferred first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    /// Whether OpenRouter may fall back when an ordered provider fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Restrict to these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    /// Never use these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    /// Only route to providers that accept every parameter the request sets.
+    ///
+    /// A provider-side guard, not a replacement for local capability filtering:
+    /// `require_parameters` rejects an unsupported model, it does not tell you
+    /// which models support what.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// Whether upstream providers may retain the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<DataCollectionPolicy>,
+    /// Zero data retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    /// Accept only these quantizations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quantizations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<OpenRouterMaxPrice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<OpenRouterSort>,
+    /// Preferred minimum throughput, in tokens/second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_min_throughput: Option<f64>,
+    /// Preferred maximum latency, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency: Option<f64>,
+}
+
+impl OpenRouterProviderRouting {
+    /// Whether any field is set. An empty routing object is not sent, so a
+    /// request that expresses no opinion does not carry an empty `provider: {}`.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Request-level OpenRouter extensions with no portable equivalent.
+///
+/// §30: sampling controls and options OpenRouter forwards but that are not part
+/// of the common dialect. Kept in one struct so "what does OpenRouter add" is
+/// answerable by reading one type.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterExtensions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_a: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f64>,
+    /// Ask OpenRouter to enforce structured output, where the chosen provider
+    /// supports it. Distinct from `response_format`, which is the portable form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_outputs: Option<bool>,
+    /// Provider-operated web search settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_options: Option<serde_json::Value>,
+    /// Upstream provider selection and privacy policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<OpenRouterProviderRouting>,
+    /// Request-level fallback model list, tried in order if the primary is
+    /// unavailable. A fallback changes the model, so it must be visible in the
+    /// body and in the returned metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+}
+
+impl OpenRouterExtensions {
+    /// Whether anything is set.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The request-body fields, ready for `ChatRequestParts::provider_params`.
+    ///
+    /// Rendered through `serde_json` so the wire keys are whatever the
+    /// serialization says, rather than a hand-maintained second list that could
+    /// disagree with the struct.
+    pub fn to_params(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let mut params = std::collections::BTreeMap::new();
+        if let Some(provider) = &self.provider {
+            if !provider.is_empty() {
+                params.insert("provider".into(), serde_json::to_value(provider).unwrap_or_default());
+            }
+        }
+        if !self.models.is_empty() {
+            params.insert("models".into(), serde_json::json!(self.models));
+        }
+        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        if let Some(object) = value.as_object() {
+            for (key, field) in object {
+                if key == "provider" || key == "models" {
+                    continue;
+                }
+                params.insert(key.clone(), field.clone());
+            }
+        }
+        params
+    }
+}
+
+/// A tool OpenRouter operates rather than the caller.
+///
+/// §38: these execute remotely, which is a different authority and lifecycle
+/// question from a local function, so they are a distinct type and an agentic
+/// policy check can see which is which.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterServerTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Whether OpenRouter should stop this tool once the model stops calling it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_when_not_called: Option<bool>,
+}
 
 /// OpenRouter Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +211,20 @@ pub struct OpenRouterConfig {
     /// being rewritten to `user` — is only observable on the wire, so this is a
     /// prerequisite for closing it rather than a nicety.
     pub base_url: Option<String>,
+    /// `HTTP-Referer` — the application attribution OpenRouter asks for.
     pub referrer: Option<String>,
+    /// `X-OpenRouter-Title` — the other attribution header.
+    ///
+    /// Configuration, not a per-request field: the title names the *application*,
+    /// and every call from this process is that application. Making it a request
+    /// parameter would mean every call site could set it differently, which is
+    /// the opposite of what attribution is for (§34).
+    pub title: Option<String>,
+    /// Ask for routing metadata on Responses, via `X-OpenRouter-Metadata`.
+    ///
+    /// Opt-in because the response grows; the data is worth having for the
+    /// model router and for diagnosing a fallback (§36).
+    pub metadata: bool,
     pub default_route: Option<String>,
     pub default_model: Option<String>,
     pub jwt_token: Option<String>,
@@ -40,6 +236,8 @@ impl Default for OpenRouterConfig {
             api_key: String::new(),
             base_url: None,
             referrer: None,
+            title: None,
+            metadata: false,
             default_route: None,
             default_model: None,
             jwt_token: None,
@@ -51,6 +249,12 @@ impl Default for OpenRouterConfig {
 #[derive(Debug)]
 pub struct OpenRouterProvider {
     config: OpenRouterConfig,
+    /// Provider-wide routing and privacy policy, merged into every request body.
+    ///
+    /// Configured here rather than per request on purpose: a deployment that
+    /// routes to a ZDR provider for some calls and not others is not making a
+    /// policy decision.
+    pub extensions: OpenRouterExtensions,
     client: reqwest::Client,
 }
 
@@ -64,6 +268,7 @@ impl OpenRouterProvider {
                 api_key: api_key.into(),
                 ..Default::default()
             },
+            extensions: OpenRouterExtensions::default(),
             client,
         })
     }
@@ -79,6 +284,7 @@ impl OpenRouterProvider {
 
         Ok(Self {
             config,
+            extensions: OpenRouterExtensions::default(),
             client: reqwest::Client::new(),
         })
     }
@@ -102,11 +308,70 @@ impl OpenRouterProvider {
         })
     }
 
+    /// Apply the headers every OpenRouter call should carry.
+    ///
+    /// §34: attribution is configuration, because it names the application.
+    /// §36: routing metadata is opt-in.
+    ///
+    /// `OpenRouter-Router` is applied for compatibility but is **legacy**: it can
+    /// only express an ordering, while [`OpenRouterProviderRouting`] in the
+    /// request body can also express `only`, `ignore`, privacy policy and price
+    /// ceilings. Callers should use the body.
+    fn apply_common_headers(
+        &self,
+        mut builder: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        if let Some(referrer) = &self.config.referrer {
+            builder = builder.header("HTTP-Referer", referrer);
+        }
+        if let Some(title) = &self.config.title {
+            builder = builder.header("X-OpenRouter-Title", title);
+        }
+        if self.config.metadata {
+            builder = builder.header("X-OpenRouter-Metadata", "enabled");
+        }
+        if let Some(route) = &self.config.default_route {
+            tracing::debug!(
+                "using the legacy OpenRouter-Router header; prefer the `provider` request field, \
+                 which can also express privacy and price policy"
+            );
+            builder = builder.header("OpenRouter-Router", route);
+        }
+        builder
+    }
+
     fn get_base_url(&self) -> &str {
         self.config
             .base_url
             .as_deref()
             .unwrap_or("https://openrouter.ai/api/v1")
+    }
+
+    /// Provider extensions that apply to every request from this provider.
+    ///
+    /// Routing and privacy policy are a property of the *deployment*, not of one
+    /// call: a process that routes to a ZDR provider for some requests and not
+    /// others is not making a policy decision, it is making a coin flip. So
+    /// they are configured on the provider and merged into every body.
+    pub fn set_extensions(&mut self, extensions: OpenRouterExtensions) {
+        self.extensions = extensions;
+    }
+
+    /// The extensions configured for this provider.
+    pub fn extensions(&self) -> &OpenRouterExtensions {
+        &self.extensions
+    }
+
+    /// Extensions for one request: the provider's, plus anything the caller put
+    /// in `extra_params` under a known extension key.
+    ///
+    /// Caller-supplied extensions win over provider defaults, so a single request
+    /// can be diverted deliberately without changing the deployment's policy.
+    fn extensions_for(&self, _request: &ChatCompletionRequest) -> Option<OpenRouterExtensions> {
+        if self.extensions.is_empty() {
+            return None;
+        }
+        Some(self.extensions.clone())
     }
 }
 
@@ -327,12 +592,15 @@ impl LLMProvider for OpenRouterProvider {
 
         // One builder, shared with the OpenAI provider: the dialect is the
         // same, so the two cannot drift into sending different fields.
+        let extensions = self.extensions_for(&request);
+        let params = extensions.as_ref().map(|e| e.to_params());
         let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
             model: &model,
             messages: &messages,
             request: &request,
             stream: false,
             tools: None,
+            provider_params: params.as_ref(),
         })?;
 
         let mut request_builder = self
@@ -349,9 +617,7 @@ impl LLMProvider for OpenRouterProvider {
         }
 
         // Add referrer for credit tracking
-        if let Some(referrer) = &self.config.referrer {
-            request_builder = request_builder.header("HTTP-Referer", referrer);
-        }
+        request_builder = self.apply_common_headers(request_builder);
 
         // Add route for provider routing
         if let Some(route) = &self.config.default_route {
@@ -458,12 +724,15 @@ impl LLMProvider for OpenRouterProvider {
         // The last hand-written field list. OpenRouter's streaming path had the
         // same three-field truncation as OpenAI's; routing it through the shared
         // builder is the end of the class, not just of this instance.
+        let extensions = self.extensions_for(&request);
+        let params = extensions.as_ref().map(|e| e.to_params());
         let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
             model: &model,
             messages: &messages,
             request: &request,
             stream: true,
             tools: None,
+            provider_params: params.as_ref(),
         })?;
 
         let mut request_builder = self
@@ -478,9 +747,7 @@ impl LLMProvider for OpenRouterProvider {
                 request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
-        if let Some(referrer) = &self.config.referrer {
-            request_builder = request_builder.header("HTTP-Referer", referrer);
-        }
+        request_builder = self.apply_common_headers(request_builder);
 
         if let Some(route) = &self.config.default_route {
             request_builder = request_builder.header("OpenRouter-Router", route);
@@ -691,12 +958,15 @@ impl LLMProvider for OpenRouterProvider {
             })
             .collect();
 
+        let extensions = self.extensions_for(&request);
+        let params = extensions.as_ref().map(|e| e.to_params());
         let body = crate::wire::build_chat_request(crate::wire::ChatRequestParts {
             model: &model,
             messages: &messages,
             request: &request,
             stream: false,
             tools: Some(&tools),
+            provider_params: params.as_ref(),
         })?;
 
         let mut request_builder = self
@@ -711,9 +981,7 @@ impl LLMProvider for OpenRouterProvider {
                 request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
-        if let Some(referrer) = &self.config.referrer {
-            request_builder = request_builder.header("HTTP-Referer", referrer);
-        }
+        request_builder = self.apply_common_headers(request_builder);
 
         if let Some(route) = &self.config.default_route {
             request_builder = request_builder.header("OpenRouter-Router", route);

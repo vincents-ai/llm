@@ -55,8 +55,17 @@ pub struct ChatRequestParts<'a> {
     pub request: &'a ChatCompletionRequest,
     /// Whether this is a streaming request.
     pub stream: bool,
-    /// Serialized tool definitions, when the request is tool-bearing.
+    /// Serialized tool definitions, when the request is request-bearing.
     pub tools: Option<&'a [Value]>,
+    /// Provider-specific fields that have no portable equivalent.
+    ///
+    /// Merged after everything else, under the same collision rule as
+    /// `extra_params`: a key that is already present is a configuration error
+    /// rather than an override. A provider extension must not be able to
+    /// shadow a typed field any more than a raw map can — otherwise "one
+    /// canonical serializer per protocol" would be true only for the portable
+    /// half.
+    pub provider_params: Option<&'a std::collections::BTreeMap<String, Value>>,
 }
 
 /// Build a Chat Completions body.
@@ -192,7 +201,21 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
         }
     }
 
-    // 4. The escape hatch, last, and only where it cannot shadow a typed field.
+    // 4. Provider-specific extensions, then the raw escape hatch. Both are
+    //    collision-checked, and both come last.
+    if let Some(extensions) = parts.provider_params {
+        for (key, value) in extensions {
+            if body.contains_key(key) {
+                return Err(LLMError::ConfigurationError {
+                    message: format!(
+                        "provider extension '{key}' collides with a typed or already-set field"
+                    ),
+                    field: Some(key.clone()),
+                });
+            }
+            body.insert(key.clone(), value.clone());
+        }
+    }
     for (key, value) in &request.extra_params {
         if body.contains_key(key) {
             return Err(LLMError::ConfigurationError {
@@ -233,6 +256,7 @@ mod tests {
             request,
             stream,
             tools: None,
+            provider_params: None,
         })
     }
 
@@ -293,7 +317,8 @@ mod tests {
             request: &request,
             stream: false,
             tools: None,
-        })
+            provider_params: None,
+})
         .expect("body");
         assert_eq!(body["model"], "gpt-4o");
     }
@@ -367,7 +392,8 @@ mod tests {
             request: &request(),
             stream: false,
             tools: None,
-        })
+            provider_params: None,
+})
         .unwrap();
         assert!(without.get("tools").is_none());
 
@@ -378,7 +404,8 @@ mod tests {
             request: &request(),
             stream: false,
             tools: Some(&tools),
-        })
+            provider_params: None,
+})
         .unwrap();
         assert_eq!(with["tools"].as_array().unwrap().len(), 1);
     }
@@ -393,7 +420,8 @@ mod tests {
             request: &request(),
             stream: false,
             tools: Some(&tools),
-        })
+            provider_params: None,
+})
         .unwrap();
         assert!(body.get("tools").is_none());
     }
@@ -418,6 +446,7 @@ mod modern_parameter_tests {
             request,
             stream,
             tools: None,
+            provider_params: None,
         })
     }
 

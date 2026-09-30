@@ -415,6 +415,7 @@ impl LLMProvider for OpenAIProvider {
             request: &request,
             stream: false,
             tools: None,
+            provider_params: None,
         })?;
 
         let json = self.send_chat_request(body).await?;
@@ -471,6 +472,7 @@ impl LLMProvider for OpenAIProvider {
             request: &request,
             stream: true,
             tools: None,
+            provider_params: None,
         })?;
 
         let mut request_builder = self
@@ -767,6 +769,7 @@ impl LLMProvider for OpenAIProvider {
             request: &request,
             stream: false,
             tools: Some(&tools),
+            provider_params: None,
         })?;
 
         let json = self.send_chat_request(body).await?;
