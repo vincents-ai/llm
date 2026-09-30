@@ -355,3 +355,70 @@ pub fn adapt_legacy(
         let _ = index;
     })
 }
+
+/// One frame of an SSE stream.
+///
+/// `Done` is an explicit variant rather than the stream simply ending: a caller
+/// must be able to tell the provider's terminator from a dropped connection,
+/// and a stream that just stops looks identical either way. That distinction is
+/// the whole reason [`parse_sse_json`] exists separately from a generic
+/// "yield JSON lines" helper.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SseFrame {
+    Data(serde_json::Value),
+    Done,
+}
+
+/// Parse an SSE stream into frames, forwarding each one.
+///
+/// The shared plumbing for a dialect that has its own event vocabulary: the
+/// framing, the buffer handling, the transport-error handling and the
+/// "no `[DONE]` means truncated" rule are all identical to the Chat
+/// Completions parser, and reimplementing them per dialect is how they drift.
+pub(crate) fn parse_sse_json(
+    response: reqwest::Response,
+) -> Pin<Box<dyn futures::Stream<Item = Result<SseFrame>> + Send>> {
+    Box::pin(async_stream::stream! {
+        let mut buffer = String::new();
+        let mut bytes = response.bytes_stream();
+
+        loop {
+            let next = match bytes.next().await {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(error)) => {
+                    yield Err(LLMError::HttpError {
+                        message: format!("stream transport failed: {error}"),
+                        status_code: None,
+                        body: None,
+                    });
+                    return;
+                }
+                None => break,
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(next.as_ref()));
+            while let Some(position) = buffer.find('\n') {
+                let line: String = buffer.drain(..=position).collect();
+                let line = line.trim_end();
+                let Some(payload) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                if payload.trim() == "[DONE]" {
+                    // The provider's own terminator, surfaced rather than
+                    // swallowed. Returning here is what ends the stream; the
+                    // frame is emitted first so a caller knows it ended cleanly.
+                    yield Ok(SseFrame::Done);
+                    return;
+                }
+                // A malformed frame is skipped rather than ending the stream.
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload.trim()) {
+                    yield Ok(SseFrame::Data(value));
+                }
+            }
+        }
+
+        yield Err(LLMError::StreamInterrupted {
+            message: "stream ended without the provider's [DONE] terminator".to_string(),
+        });
+    })
+}

@@ -25,6 +25,17 @@ pub mod ollama;
 #[cfg(feature = "openrouter")]
 pub mod openrouter;
 pub mod pricing;
+pub mod responses;
+pub use responses::{
+    ConversationRef, Response, ResponseContent, ResponseFunctionCall, ResponseInput,
+    ResponseInputItem, ResponseMessage, ResponseOutputItem, ResponseReasoningItem,
+    ResponseRequest, ResponseStatus, ResponseTool, ResponseToolChoice, ResponsesUsage,
+    TruncationMode,
+};
+pub mod responses_provider;
+pub use responses_provider::{
+    OpenAIResponsesConfig, OpenAIResponsesProvider, ResponseStreamEvent,
+};
 pub mod wire;
 pub mod stream;
 
