@@ -770,3 +770,181 @@ async fn retrieve_and_cancel_hit_the_right_endpoints() {
     let cancelled = p.cancel("resp_2").await.expect("cancel");
     assert_eq!(cancelled.status, ResponseStatus::Cancelled);
 }
+
+// ── §62: the remaining named golden cases ─────────────────────────────────
+
+fn test_config(base: &str) -> OpenAIResponsesConfig {
+    OpenAIResponsesConfig {
+        api_key: "k".into(),
+        base_url: Some(base.to_string()),
+        default_model: Some("gpt-5".into()),
+        ..Default::default()
+    }
+}
+
+
+#[tokio::test]
+async fn a_tool_result_continuation_round_trips() {
+    // §62: "tool result continuation". The assistant's function call, the caller's
+    // `function_call_output`, then the model's answer -- and the `call_id` must
+    // still match, because a mismatch here makes the request unanswerable.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_cont", "object": "response", "created_at": 1, "model": "gpt-5",
+            "status": "completed",
+            "output": [{"type": "message", "id": "m2", "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "It is 12C.",
+                                     "annotations": []}]}]
+        })))
+        .mount(&server)
+        .await;
+
+    let response = OpenAIResponsesProvider::with_config(test_config(&server.uri()))
+        .expect("provider")
+        .create(ResponseRequest {
+            model: "gpt-5".into(),
+            input: ResponseInput::items(vec![
+                ResponseInputItem::Message {
+                    role: "user".into(),
+                    content: vec![ResponseContent::InputText { text: "weather in Oslo?".into() }],
+                },
+                ResponseInputItem::FunctionCall {
+                    id: Some("fc_1".into()),
+                    call_id: "call_a".into(),
+                    name: "get_weather".into(),
+                    arguments: r#"{"city":"Oslo"}"#.into(),
+                },
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: "call_a".into(),
+                    output: "12C and sunny".into(),
+                },
+            ]),
+            ..Default::default()
+        })
+        .await
+        .expect("request succeeds");
+
+    let requests = server.received_requests().await.expect("recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    let input = body["input"].as_array().expect("items");
+
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_a");
+    assert_eq!(input[2]["type"], "function_call_output");
+    // The link is what makes the continuation work; a renamed field would leave
+    // the provider unable to match the result to the call.
+    assert_eq!(
+        input[2]["call_id"], input[1]["call_id"],
+        "the output must reference the call it answers"
+    );
+    assert_eq!(input[2]["output"], "12C and sunny");
+
+    assert_eq!(response.output_text(), "It is 12C.");
+}
+
+#[tokio::test]
+async fn an_incomplete_response_is_reported_as_incomplete() {
+    // §62: "status incomplete". A response cut off by the output-token limit is
+    // not a completed response, and treating it as one ships a half-answer.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_inc", "object": "response", "created_at": 1, "model": "gpt-5",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "message", "id": "m", "role": "assistant",
+                        "status": "incomplete",
+                        "content": [{"type": "output_text", "text": "It is 1",
+                                     "annotations": []}]}]
+        })))
+        .mount(&server)
+        .await;
+
+    let response = OpenAIResponsesProvider::with_config(test_config(&server.uri()))
+        .expect("provider")
+        .create(ResponseRequest {
+            model: "gpt-5".into(),
+            input: ResponseInput::text("weather?"),
+            ..Default::default()
+        })
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status, ResponseStatus::Incomplete);
+    assert!(response.status.is_terminal(), "a caller must be able to stop waiting");
+    // The reason is retained: `incomplete` alone does not say *why*, and the
+    // remedy differs between "hit the token limit" and "was filtered".
+    assert_eq!(
+        response
+            .incomplete_details
+            .as_ref()
+            .expect("details")["reason"],
+        "max_output_tokens"
+    );
+    // The partial text is still delivered -- it is the only thing the caller has.
+    assert_eq!(response.output_text(), "It is 1");
+}
+
+#[tokio::test]
+async fn a_completed_response_is_not_terminal_confused_with_incomplete() {
+    // The two statuses differ in what a caller should do: `completed` means
+    // done, `incomplete` means the answer may be short.
+    assert!(ResponseStatus::Completed.is_terminal());
+    assert!(ResponseStatus::Incomplete.is_terminal());
+    assert!(ResponseStatus::Failed.is_terminal());
+    assert!(ResponseStatus::Cancelled.is_terminal());
+    // A queued or in-progress background response is *not*, so a caller does not
+    // stop waiting on one.
+    assert!(!ResponseStatus::Queued.is_terminal());
+    assert!(!ResponseStatus::InProgress.is_terminal());
+}
+
+#[tokio::test]
+async fn an_input_content_array_preserves_order_and_nesting() {
+    // §62: "input content array". A message whose parts are reordered reads as a
+    // different question, and this is the shape that carries them.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "r", "object": "response", "created_at": 1, "model": "gpt-5",
+            "status": "completed", "output": []
+        })))
+        .mount(&server)
+        .await;
+
+    OpenAIResponsesProvider::with_config(test_config(&server.uri()))
+        .expect("provider")
+        .create(ResponseRequest {
+            model: "gpt-5".into(),
+            input: ResponseInput::items(vec![ResponseInputItem::Message {
+                role: "user".into(),
+                content: vec![
+                    ResponseContent::InputText { text: "what is in these?".into() },
+                    ResponseContent::InputImage {
+                        image_url: "https://example.com/a.png".into(),
+                        detail: Some(vincents_llm::types::ImageDetail::High),
+                    },
+                    ResponseContent::InputText { text: "be specific".into() },
+                ],
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    let requests = server.received_requests().await.expect("recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    let content = body["input"][0]["content"].as_array().expect("array");
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "what is in these?");
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["image_url"], "https://example.com/a.png");
+    assert_eq!(content[1]["detail"], "high");
+    assert_eq!(content[2]["text"], "be specific", "order is the message");
+}
