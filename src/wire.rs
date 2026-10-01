@@ -103,7 +103,10 @@ pub fn validate_request(
     // block on a non-streaming request is either ignored or rejected depending
     // on the provider, and `include_usage` is exactly the setting that decides
     // whether the caller ever learns what the request cost.
-    if parts.stream == false && request.extra_params.contains_key("stream_options") {
+    if parts.stream == false
+        && (request.stream_options.is_some()
+            || request.extra_params.contains_key("stream_options"))
+    {
         return Err(LLMError::InvalidParameterCombination {
             message: "stream_options was set on a non-streaming request (stream = false); \
                       include_usage only applies to streams"
@@ -227,6 +230,15 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
     }
     if let Some(verbosity) = &request.verbosity {
         body.insert("verbosity".into(), json!(verbosity.as_str()));
+    }
+    if let Some(stream_options) = &request.stream_options {
+        body.insert(
+            "stream_options".into(),
+            serde_json::to_value(stream_options).unwrap_or(Value::Null),
+        );
+    }
+    if let Some(store) = request.store {
+        body.insert("store".into(), json!(store));
     }
     if let Some(service_tier) = &request.service_tier {
         body.insert("service_tier".into(), json!(service_tier.as_str()));

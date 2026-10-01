@@ -188,3 +188,68 @@ async fn an_invalid_request_never_reaches_the_provider() {
         "validation must run before the request is sent"
     );
 }
+// ── §18: `stream_options` as a typed field ────────────────────────────────
+
+#[test]
+fn stream_options_are_typed_and_reach_the_body() {
+    use vincents_llm::types::StreamOptions;
+    let mut request = request();
+    request.stream_options = Some(StreamOptions {
+        include_usage: Some(true),
+    });
+    let built = build(&request, true).expect("valid on a stream");
+    assert_eq!(built["stream_options"]["include_usage"], true);
+}
+
+#[test]
+fn include_usage_is_what_makes_a_stream_costable() {
+    use vincents_llm::types::StreamOptions;
+    // A streamed response with no usage frame cannot be quoted or billed. The
+    // field is load-bearing, which is why it is typed rather than a raw key a
+    // caller can misspell.
+    let mut request = request();
+    request.stream_options = Some(StreamOptions {
+        include_usage: Some(true),
+    });
+    let built = build(&request, true).expect("valid");
+    assert_eq!(
+        built["stream_options"]["include_usage"], true,
+        "without this the caller never learns what the stream cost"
+    );
+}
+
+#[test]
+fn stream_options_are_still_rejected_on_a_non_streaming_request() {
+    use vincents_llm::types::StreamOptions;
+    let mut request = request();
+    request.stream_options = Some(StreamOptions {
+        include_usage: Some(true),
+    });
+    let error = build_chat_request(ChatRequestParts {
+        model: "gpt-4o",
+        messages: &messages(),
+        request: &request,
+        stream: false,
+        tools: None,
+        default_service_tier: None,
+        provider_params: None,
+    })
+    .expect_err("stream_options requires stream = true");
+    assert!(
+        matches!(error, vincents_llm::error::LLMError::InvalidParameterCombination { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn store_reaches_the_body() {
+    let mut request = request();
+    request.store = Some(true);
+    assert_eq!(build(&request, false).expect("built")["store"], true);
+    request.store = Some(false);
+    assert_eq!(
+        build(&request, false).expect("built")["store"], false,
+        "`false` is a request, not an absence -- omitting it would change what the \\
+         provider retains"
+    );
+}

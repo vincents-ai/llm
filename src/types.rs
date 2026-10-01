@@ -54,6 +54,17 @@ fn content_json_or_null(content: &MessageContent) -> serde_json::Value {
     content.to_openai_json().unwrap_or(serde_json::Value::Null)
 }
 
+/// Options that apply to a streaming response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamOptions {
+    /// Ask for a final usage frame.
+    ///
+    /// A streamed response otherwise reports no token counts at all, which makes
+    /// a streamed call unquotable and un-costable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
+}
+
 /// The reserved body key a provider's `x-request-id` is recorded under.
 pub const PROVIDER_REQUEST_ID_KEY: &str = "_provider_request_id";
 
@@ -1246,7 +1257,17 @@ pub struct ChatCompletionRequest {
 
     /// How many alternatives to return per token.
     ///
-    /// Only meaningful with `logprobs`; the builder rejects the combination.
+    /// Streaming options, for endpoints that accept them.
+    ///
+    /// §18 lists `stream_options` as first-class, and it is load-bearing rather
+    /// than cosmetic: `include_usage` decides whether a streamed response ever
+    /// reports what it cost. Left as a raw key, a caller who sets it wrongly gets
+    /// no usage and no explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+    /// Ask the provider to retain this exchange, where the endpoint supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u8>,
 
@@ -1305,6 +1326,8 @@ impl Default for ChatCompletionRequest {
             seed: None,
             logprobs: None,
             top_logprobs: None,
+            stream_options: None,
+            store: None,
             response_format: None,
             tools: None,
             tool_choice: None,
