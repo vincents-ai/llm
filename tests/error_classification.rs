@@ -416,3 +416,86 @@ async fn unknown_fields_round_trip_through_a_stored_session() {
         serde_json::from_str(&stored).expect("reloads");
     assert_eq!(reloaded.unknown("future_field"), Some(&json!(42)));
 }
+
+// ── §73: the provider's request id is observable on success, not only error ──
+
+#[tokio::test]
+async fn the_provider_request_id_is_captured_on_a_successful_response() {
+    // §73: "Provider metadata/request ID survives the wrapper." `x-request-id` is
+    // the provider's handle for the call -- a different namespace from the
+    // response `id` -- and a support conversation is indexed by it.
+    //
+    // It used to be captured on the *error* path only, so a slow or
+    // wrong-but-valid response had nothing to quote.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ok_body())
+                .insert_header("x-request-id", "req_success_1"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    assert_eq!(
+        response.provider_request_id(),
+        Some("req_success_1"),
+        "the provider's handle for the call"
+    );
+    // And it is not the response id -- the two are different namespaces.
+    assert_ne!(response.provider_request_id(), Some(response.id.as_str()));
+}
+
+#[tokio::test]
+async fn a_response_without_the_header_reports_none_rather_than_the_response_id() {
+    // Backfilling with the response id would make the two indistinguishable and
+    // send someone to the provider's logs with an id that is not in them.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            default_model: Some("gpt-4o".into()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+
+    use vincents_llm::provider::LLMProvider;
+    let response = provider
+        .chat_completion(vincents_llm::types::ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![vincents_llm::types::ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    assert_eq!(response.provider_request_id(), None);
+    assert!(!response.id.is_empty(), "the response id is still there");
+}

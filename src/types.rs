@@ -54,6 +54,9 @@ fn content_json_or_null(content: &MessageContent) -> serde_json::Value {
     content.to_openai_json().unwrap_or(serde_json::Value::Null)
 }
 
+/// The reserved body key a provider's `x-request-id` is recorded under.
+pub const PROVIDER_REQUEST_ID_KEY: &str = "_provider_request_id";
+
 /// One piece of a multimodal message.
 ///
 /// A typed enum rather than a JSON blob because the brief's point is that these
@@ -1360,6 +1363,18 @@ impl ChatCompletionResponse {
     /// Whether an unrecognised field named `key` was present.
     pub fn has_unknown(&self, key: &str) -> bool {
         self.unknown_fields.contains_key(key)
+    }
+
+    /// The provider's own correlation id, when it returned one.
+    ///
+    /// §73: "Provider metadata/request ID survives the wrapper." `id` is the
+    /// response's identifier; `x-request-id` is the *provider's* handle for the
+    /// call, and it is what a support conversation is indexed by. It only exists
+    /// in a response header, so it has to be captured here or not at all.
+    pub fn provider_request_id(&self) -> Option<&str> {
+        self.unknown_fields
+            .get(PROVIDER_REQUEST_ID_KEY)
+            .and_then(|value| value.as_str())
     }
 
     /// An unrecognised field by name.

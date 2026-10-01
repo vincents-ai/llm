@@ -274,13 +274,31 @@ impl OpenAIProvider {
             ));
         }
 
-        response
+        // §73: the provider's own handle for this call, not the response id.
+        // Captured before the body is consumed -- and on the *success* path
+        // too, because a slow or wrong-but-valid response is exactly when
+        // someone needs to quote a request id.
+        let provider_request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        let mut json: Value = response
             .json()
             .await
             .map_err(|e| LLMError::SerializationError {
                 message: e.to_string(),
                 context: Some("Failed to parse OpenAI response".to_string()),
-            })
+            })?;
+        if let (Some(id), Some(object)) = (&provider_request_id, json.as_object_mut()) {
+            object.insert(
+                crate::types::PROVIDER_REQUEST_ID_KEY.to_string(),
+                Value::String(id.clone()),
+            );
+        }
+
+        Ok(json)
     }
 
     fn build_response(json: Value, request_model: &str) -> ChatCompletionResponse {
