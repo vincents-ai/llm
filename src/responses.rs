@@ -365,6 +365,12 @@ pub enum ToolChoiceMode {
     Required,
 }
 
+impl From<ToolChoiceMode> for ResponseToolChoice {
+    fn from(mode: ToolChoiceMode) -> Self {
+        ResponseToolChoice::Mode(mode)
+    }
+}
+
 impl ResponseToolChoice {
     fn to_wire(&self) -> Value {
         match self {
