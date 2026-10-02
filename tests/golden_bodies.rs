@@ -501,6 +501,10 @@ fn golden_openrouter_extensions_serialize_as_expected() {
             ),
         }),
         models: vec!["anthropic/claude-sonnet-4".into()],
+        plugins: vec![],
+        cache_control: None,
+        modalities: None,
+        stop_server_tools_when: None,
     };
 
     let params = extensions.to_params();
