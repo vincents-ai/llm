@@ -223,11 +223,59 @@ pub fn catalog() -> BTreeMap<&'static str, &'static Descriptor> {
     CATALOG.iter().map(|d| (d.id, d)).collect()
 }
 
-/// The price for a model, or `None` when the catalog does not know it.
+/// Operator-configured prices, consulted before the catalog.
 ///
-/// `None` is the correct answer for an unknown model. It is not an invitation to
-/// substitute a similar-looking one.
+/// §41 requires three sources: configured pricing, live/provider pricing, and a
+/// correct "unknown". Without the first two, a deployment pricing a model the
+/// dated catalog has never heard of has no way to say what it costs -- and the
+/// only remaining option is the one §41 forbids, substituting a similar model's
+/// price.
+///
+/// `OnceLock` rather than a mutable global with a lock: configuration is set once
+/// at startup and read on every cost estimate.
+static CONFIGURED: std::sync::OnceLock<std::sync::RwLock<BTreeMap<String, ModelPricing>>> = std::sync::OnceLock::new();
+
+fn configured() -> &'static std::sync::RwLock<BTreeMap<String, ModelPricing>> {
+    CONFIGURED.get_or_init(|| std::sync::RwLock::new(BTreeMap::new()))
+}
+
+/// Set or replace a model's price, overriding the catalog.
+///
+/// An operator's number wins over the catalog: the catalog is dated data and
+/// the operator knows about today's price.
+pub fn configure_price(model: &str, pricing: ModelPricing) {
+    if let Ok(mut prices) = configured().write() {
+        prices.insert(model.to_string(), pricing);
+    }
+}
+
+/// Remove an override, returning to the catalog's price.
+pub fn clear_configured_price(model: &str) {
+    if let Ok(mut prices) = configured().write() {
+        prices.remove(model);
+    }
+}
+
+/// Every model with an operator-configured price.
+pub fn configured_models() -> Vec<String> {
+    configured()
+        .read()
+        .map(|prices| prices.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The price for a model, or `None` when neither the configuration nor the
+/// catalog knows it.
+///
+/// The order is deliberate: an operator's configured price, then the catalog.
+/// `None` is the correct answer for a model neither knows, and it is not an
+/// invitation to substitute a similar-looking one.
 pub fn price_for(model: &str) -> Option<ModelPricing> {
+    if let Ok(prices) = configured().read() {
+        if let Some(pricing) = prices.get(model) {
+            return Some(pricing.clone());
+        }
+    }
     descriptor_for(model).and_then(|d| d.pricing.clone())
 }
 

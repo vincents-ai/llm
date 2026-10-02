@@ -354,6 +354,30 @@ impl OpenAIProvider {
         }
     }
 
+    /// Parse a provider's own price, if it sent one.
+    ///
+    /// §41's second pricing source. Per-token prices are converted to per-1K to
+    /// match `ModelPricing`. `None` when absent -- which is not the same as a
+    /// price of zero, so a genuinely free model is distinguished from an
+    /// unreported one.
+    fn parse_live_pricing(value: &Value) -> Option<crate::types::ModelPricing> {
+        let prompt = value.get("prompt").and_then(|v| v.as_f64());
+        let completion = value.get("completion").and_then(|v| v.as_f64());
+        prompt?;
+        completion?;
+        let prompt = prompt.unwrap_or(0.0) * 1000.0;
+        let completion = completion.unwrap_or(0.0) * 1000.0;
+        Some(crate::types::ModelPricing {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            image_tokens: value
+                .get("image")
+                .and_then(|v| v.as_f64())
+                .map(|price| price * 1000.0),
+            is_free: prompt == 0.0 && completion == 0.0,
+        })
+    }
+
     /// Fetch models from the live OpenAI API.
     /// The live `/models` listing, parsed.
     ///
@@ -444,7 +468,12 @@ impl OpenAIProvider {
                 context_window: 0,
                 max_output_tokens: 0,
                 capabilities,
-                pricing: None,
+                // §41: the provider's own price where it supplies one. The
+                // Chat Completions `/models` listing does not include pricing
+                // today, so this is normally `None` -- but reading it means the
+                // endpoint becomes usable as a pricing source the moment it
+                // starts sending one, rather than silently discarding it.
+                pricing: Self::parse_live_pricing(&m["pricing"]),
                 created: m["created"].as_u64().unwrap_or(0),
                 available: true,
                 supported_parameters: Default::default(),

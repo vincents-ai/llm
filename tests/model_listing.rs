@@ -549,3 +549,112 @@ async fn an_unknown_capability_does_not_make_the_set_authoritative() {
         "one undetermined capability makes the set unusable for routing"
     );
 }
+
+// ── §41: the three pricing sources ────────────────────────────────────────
+
+#[test]
+fn an_operator_configured_price_overrides_the_catalog() {
+    use vincents_llm::types::ModelPricing;
+    let model = "a-model-with-an-operator-price";
+    assert!(
+        vincents_llm::pricing::price_for(model).is_none(),
+        "a model neither source knows has no price, which is the correct answer"
+    );
+
+    vincents_llm::pricing::configure_price(
+        model,
+        ModelPricing {
+            prompt_tokens: 0.5,
+            completion_tokens: 1.5,
+            image_tokens: None,
+            is_free: false,
+        },
+    );
+    let configured = vincents_llm::pricing::price_for(model).expect("configured");
+    assert_eq!(configured.prompt_tokens, 0.5);
+    assert!(vincents_llm::pricing::configured_models().contains(&model.to_string()));
+
+    // Removing it returns to the catalog, which does not know this model --
+    // so the answer becomes `None` again rather than a stale configured number.
+    vincents_llm::pricing::clear_configured_price(model);
+    assert!(vincents_llm::pricing::price_for(model).is_none());
+}
+
+#[test]
+fn a_configured_price_wins_over_a_catalog_entry() {
+    use vincents_llm::types::ModelPricing;
+    // The catalog is dated data; the operator knows about today's price.
+    let catalog = vincents_llm::pricing::price_for("gpt-4o").expect("catalog knows it");
+    vincents_llm::pricing::configure_price(
+        "gpt-4o",
+        ModelPricing {
+            prompt_tokens: 99.0,
+            completion_tokens: 99.0,
+            image_tokens: None,
+            is_free: false,
+        },
+    );
+    assert_eq!(
+        vincents_llm::pricing::price_for("gpt-4o")
+            .expect("configured")
+            .prompt_tokens,
+        99.0
+    );
+    vincents_llm::pricing::clear_configured_price("gpt-4o");
+    assert_eq!(
+        vincents_llm::pricing::price_for("gpt-4o").expect("catalog").prompt_tokens,
+        catalog.prompt_tokens,
+        "and the catalog price returns once the override is removed"
+    );
+}
+
+#[tokio::test]
+async fn a_price_the_provider_supplies_is_read_rather_than_discarded() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "priced-model", "created": 1,
+                 "pricing": {"prompt": 0.0000025, "completion": 0.00001}},
+                {"id": "unpriced-model", "created": 2}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = vincents_llm::openai::OpenAIProvider::with_config(
+        vincents_llm::openai::OpenAIConfig {
+            api_key: "k".into(),
+            base_url: Some(server.uri()),
+            ..Default::default()
+        },
+    )
+    .expect("provider");
+    let models = provider.fetch_models_live().await.expect("listing");
+
+    // Per-token converted to per-1K, which is what `ModelPricing` documents.
+    let priced = models.iter().find(|m| m.id == "priced-model").expect("present");
+    let pricing = priced.pricing.as_ref().expect("the provider's price is read");
+    // Per-token 0.0000025 -> per-1K 0.0025. The conversion is the point: a
+    // price quoted per token silently used as a per-1K price is 1000x wrong,
+    // and it is wrong in the direction that looks plausible.
+    assert!((pricing.prompt_tokens - 0.0025).abs() < 1e-9, "{pricing:?}");
+    assert!((pricing.completion_tokens - 0.01).abs() < 1e-9, "{pricing:?}");
+    assert!(!pricing.is_free);
+
+    // And an unreported price is `None`, not zero: a free model and a model
+    // nobody has quoted are different facts.
+    let unpriced = models
+        .iter()
+        .find(|m| m.id == "unpriced-model")
+        .expect("present");
+    assert!(
+        unpriced.pricing.is_none(),
+        "an absent price must not become a free model"
+    );
+}
