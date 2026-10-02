@@ -1268,6 +1268,19 @@ pub struct ChatCompletionRequest {
     /// Ask the provider to retain this exchange, where the endpoint supports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// A stable key that groups requests sharing a prompt prefix, for the
+    /// provider's prompt cache.
+    ///
+    /// §3 lists prompt-cache controls as missing. The mechanism is worth a typed
+    /// field rather than an `extra_params` key: a caller setting it per request
+    /// by hand will produce a different key each time and measure no hit rate at
+    /// all. It is derived from the *task*, not the request, which is why it lives
+    /// beside the other request-shaping fields rather than in the message.
+    ///
+    /// Endpoints that do not accept it ignore the field; the brief's own
+    /// principle is that an unknown field must be safely ignorable, not fatal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u8>,
 
@@ -1328,6 +1341,7 @@ impl Default for ChatCompletionRequest {
             top_logprobs: None,
             stream_options: None,
             store: None,
+            prompt_cache_key: None,
             response_format: None,
             tools: None,
             tool_choice: None,

@@ -30,16 +30,20 @@ fn messages() -> Vec<Value> {
 }
 
 fn body(request: &ChatCompletionRequest) -> Value {
+    build(request, false).expect("valid request")
+}
+
+/// Build a body for either path, so a test can compare the two.
+fn build(request: &ChatCompletionRequest, stream: bool) -> Result<Value, vincents_llm::error::LLMError> {
     build_chat_request(ChatRequestParts {
         model: "gpt-4o",
         messages: &messages(),
         request,
-        stream: false,
+        stream,
         tools: None,
         provider_params: None,
         default_service_tier: None,
     })
-    .expect("valid request")
 }
 
 fn request() -> ChatCompletionRequest {
@@ -711,4 +715,116 @@ async fn the_adapter_appends_to_tools_rather_than_replacing_them() {
         vec!["already_set", "from_legacy"],
         "the union, not a silent replacement"
     );
+}
+
+// ── §3: the fields the brief names as missing, all first-class ────────────
+
+#[test]
+fn golden_prompt_cache_key_reaches_the_body() {
+    // A per-request key derived by hand produces a different key each time and
+    // measures no hit rate at all -- which is the reason it is a typed field
+    // beside the other request-shaping fields rather than an `extra_params` key.
+    let mut request = request();
+    request.prompt_cache_key = Some("task-42".into());
+    assert_eq!(
+        body(&request)["prompt_cache_key"],
+        "task-42"
+    );
+}
+
+#[test]
+fn an_unset_prompt_cache_key_is_absent_not_null() {
+    // A null on an unsupported field is rejected by some providers, and a key
+    // that is present-but-empty groups every request into one cache entry.
+    let built = body(&request());
+    assert!(built.get("prompt_cache_key").is_none(), "{built}");
+}
+
+#[test]
+fn every_field_the_brief_names_as_missing_is_first_class() {
+    // §3 lists these as absent from the original `ChatCompletionRequest`. Each is
+    // a named field now, not an `extra_params` key, so a caller gets a compile
+    // error rather than a silently ignored parameter.
+    use vincents_llm::types::{ChatCompletionRequest as R, StreamOptions};
+
+    let mut request: R = request();
+    request.max_completion_tokens = Some(1);
+    request.reasoning = Some(vincents_llm::types::ReasoningConfig {
+        effort: Some(vincents_llm::types::ReasoningEffort("low".into())),
+        max_tokens: None,
+        exclude: None,
+        summary: None,
+    });
+    request.verbosity = Some(vincents_llm::types::Verbosity("low".into()));
+    request.seed = Some(1);
+    request.logprobs = Some(true);
+    request.top_logprobs = Some(1);
+    request.response_format = Some(vincents_llm::types::ResponseFormat::JsonObject);
+    request.tools = Some(vec![ToolDefinition::Function(FunctionDefinitionWire {
+        name: "f".into(),
+        description: None,
+        parameters: None,
+        strict: Some(true),
+    })]);
+    request.tool_choice = Some(ToolChoice::Auto);
+    request.parallel_tool_calls = Some(true);
+    request.stream_options = Some(StreamOptions {
+        include_usage: Some(true),
+    });
+    request.service_tier = Some(vincents_llm::types::ServiceTier("flex".into()));
+    request.metadata.insert("k".into(), "v".into());
+    request.store = Some(true);
+    request.prompt_cache_key = Some("c".into());
+    request.messages = vec![
+        ChatMessage::developer("d"),
+        ChatMessage::User {
+            content: vincents_llm::types::MessageContent::Parts(vec![ContentPart::Text {
+                text: "hi".into(),
+            }]),
+            name: None,
+        },
+    ];
+
+    // Every one of them reaches the wire. Built as a streaming request, because
+    // `stream_options` is only meaningful there -- and the rejection on a
+    // non-streaming request is itself a thing worth having asserted elsewhere.
+    //
+    // Messages come from the request rather than the shared fixture, because two
+    // of the fields under test are message-shaped.
+    let serialized = request
+        .messages
+        .iter()
+        .map(ChatMessage::to_openai_json)
+        .collect::<Vec<_>>();
+    let built = build_chat_request(ChatRequestParts {
+        model: "gpt-4o",
+        messages: &serialized,
+        request: &request,
+        stream: true,
+        tools: None,
+        default_service_tier: None,
+        provider_params: None,
+    })
+    .expect("valid");
+    for field in [
+        "max_completion_tokens",
+        "reasoning",
+        "verbosity",
+        "seed",
+        "logprobs",
+        "top_logprobs",
+        "response_format",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream_options",
+        "service_tier",
+        "metadata",
+        "store",
+        "prompt_cache_key",
+    ] {
+        assert!(built.get(field).is_some(), "'{field}' is not first-class: {built}");
+    }
+    assert_eq!(built["stream"], true);
+    assert_eq!(built["messages"][0]["role"], "developer");
+    assert!(built["messages"][1]["content"].is_array());
 }

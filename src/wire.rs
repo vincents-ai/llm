@@ -240,6 +240,9 @@ pub fn build_chat_request(parts: ChatRequestParts<'_>) -> Result<Value, LLMError
     if let Some(store) = request.store {
         body.insert("store".into(), json!(store));
     }
+    if let Some(key) = &request.prompt_cache_key {
+        body.insert("prompt_cache_key".into(), json!(key));
+    }
     if let Some(service_tier) = &request.service_tier {
         body.insert("service_tier".into(), json!(service_tier.as_str()));
     }
