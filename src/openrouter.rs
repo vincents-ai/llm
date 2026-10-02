@@ -144,6 +144,28 @@ pub struct OpenRouterExtensions {
     /// body and in the returned metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// OpenRouter plugin ids to enable, where the endpoint accepts them.
+    ///
+    /// §35. A plugin is OpenRouter-operated, so it belongs here rather than in a
+    /// portable typed field: an equivalent exists nowhere else, and a caller
+    /// using one should be able to see that the call leaves the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<String>,
+    /// Prompt-cache control for the routed provider.
+    ///
+    /// §35. Distinct from the portable `prompt_cache_key`, which only *names* a
+    /// prefix; this decides whether the prefix is written at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
+    /// Output modalities to request, where the routed model offers a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<serde_json::Value>,
+    /// Stop a server tool once the model stops calling it.
+    ///
+    /// §35. Off by default upstream, which means a tool that keeps billing after
+    /// the conversation has moved on -- so this is stated rather than defaulted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_server_tools_when: Option<String>,
 }
 
 impl OpenRouterExtensions {

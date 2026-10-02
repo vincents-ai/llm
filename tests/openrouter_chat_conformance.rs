@@ -650,3 +650,62 @@ fn a_server_tool_must_be_named_as_one() {
     );
     assert!(OpenRouterServerTool::new("openrouter:web_search").is_ok());
 }
+
+// ── §35: the OpenRouter Responses extension fields ──────────────────────────
+
+#[tokio::test]
+async fn every_openrouter_extension_field_named_by_the_brief_reaches_the_body() {
+    // §35 names them explicitly: models, provider, plugins, session_id, trace,
+    // cache_control, modalities, server tools, stop_server_tools_when.
+    let server = server().await;
+    let mut p = provider(&server, |c| {
+        // session_id and trace are headers, and are asserted in the header test.
+        c.session_id = Some("traj-1".into());
+        c.trace = Some("span-1".into());
+    });
+    p.set_extensions(OpenRouterExtensions {
+        models: vec!["anthropic/claude-sonnet-4".into()],
+        provider: Some(OpenRouterProviderRouting {
+            zdr: Some(true),
+            ..Default::default()
+        }),
+        plugins: vec!["image-gen".into()],
+        cache_control: Some(json!({"type": "ephemeral"})),
+        modalities: Some(json!(["text", "image"])),
+        stop_server_tools_when: Some("model_stopped".into()),
+        top_k: Some(40),
+        ..Default::default()
+    });
+    p.chat_completion(request()).await.expect("ok");
+
+    let body = body_of(&server).await;
+    assert_eq!(body["models"][0], "anthropic/claude-sonnet-4", "{body}");
+    assert_eq!(body["provider"]["zdr"], true);
+    assert_eq!(body["plugins"][0], "image-gen");
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["modalities"][1], "image");
+    // Stated rather than defaulted: upstream leaves it off, which means a tool
+    // that keeps billing after the conversation has moved on.
+    assert_eq!(body["stop_server_tools_when"], "model_stopped");
+    assert_eq!(body["top_k"], 40);
+}
+
+#[tokio::test]
+async fn unset_extension_fields_are_omitted_rather_than_null() {
+    let server = server().await;
+    provider(&server, |_| {})
+        .chat_completion(request())
+        .await
+        .expect("ok");
+    let body = body_of(&server).await;
+    for field in [
+        "plugins",
+        "cache_control",
+        "modalities",
+        "stop_server_tools_when",
+        "models",
+        "provider",
+    ] {
+        assert!(body.get(field).is_none(), "'{field}' should be absent: {body}");
+    }
+}
