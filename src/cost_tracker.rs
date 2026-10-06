@@ -132,6 +132,12 @@ pub struct CostTracker {
     budget: RwLock<Option<BudgetConfig>>,
 }
 
+impl Default for CostTracker {
+    fn default() -> Self {
+        Self::default_window()
+    }
+}
+
 impl CostTracker {
     /// Create a new cost tracker with specified window duration
     pub fn new(window_duration: Duration) -> Self {
@@ -143,7 +149,13 @@ impl CostTracker {
     }
 
     /// Create a new cost tracker with default window (1 hour)
-    pub fn default() -> Self {
+    /// The default window.
+    ///
+    /// Named `default_window` rather than `default` because an inherent
+    /// `default()` is callable without a type annotation and so silently
+    /// shadows `Default::default()` at every `CostTracker::default()` site.
+    /// `Default` is implemented below; both spell the same thing.
+    pub fn default_window() -> Self {
         Self::new(Duration::from_secs(3600))
     }
 

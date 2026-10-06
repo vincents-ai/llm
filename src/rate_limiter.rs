@@ -142,7 +142,7 @@ impl RateLimiter {
             // and use that as our sleep duration. The Notify will also wake us
             // early if `reset()` adds tokens externally.
             let rate = self.refill_rate.load(Ordering::Relaxed).max(1);
-            let wait_ms = (1000_u64 / rate).max(1).min(1000);
+            let wait_ms = (1000_u64 / rate).clamp(1, 1000);
             let notify = self.available.clone();
 
             tokio::select! {

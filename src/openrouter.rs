@@ -325,6 +325,7 @@ impl OpenRouterServerTool {
 
 /// OpenRouter Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct OpenRouterConfig {
     pub api_key: String,
     /// Override the API base URL.
@@ -375,23 +376,6 @@ pub struct OpenRouterConfig {
     pub jwt_token: Option<String>,
 }
 
-impl Default for OpenRouterConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            base_url: None,
-            referrer: None,
-            title: None,
-            metadata: false,
-            session_id: None,
-            trace: None,
-            user_id: None,
-            default_route: None,
-            default_model: None,
-            jwt_token: None,
-        }
-    }
-}
 
 /// OpenRouter Provider
 #[derive(Debug)]
@@ -432,7 +416,7 @@ impl OpenRouterProvider {
 
     /// Create with custom configuration
     pub fn with_config(config: OpenRouterConfig) -> Result<Self> {
-        if config.api_key.is_empty() && config.jwt_token.as_ref().map_or(true, |s| s.is_empty()) {
+        if config.api_key.is_empty() && config.jwt_token.as_ref().is_none_or(|s| s.is_empty()) {
             return Err(LLMError::ConfigurationError {
                 message: "OpenRouter API key or JWT token is required".to_string(),
                 field: Some("api_key".to_string()),
@@ -544,7 +528,7 @@ impl OpenRouterProvider {
 
         let mut request_builder = self
             .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .post(format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
 
         if let Some(jwt) = &self.config.jwt_token {
@@ -646,7 +630,7 @@ impl LLMProvider for OpenRouterProvider {
     async fn list_models(&self) -> Result<Vec<FullModelInfo>> {
         let resp = self
             .client
-            .get(&format!("{}/models", self.get_base_url()))
+            .get(format!("{}/models", self.get_base_url()))
             .header("Content-Type", "application/json")
             .send()
             .await
@@ -858,7 +842,7 @@ impl LLMProvider for OpenRouterProvider {
 
         let mut request_builder = self
             .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .post(format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
 
         // Add authentication header

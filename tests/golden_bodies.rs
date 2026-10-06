@@ -438,8 +438,7 @@ fn golden_extra_param_without_and_with_collision() {
 fn golden_tool_role_round_trip() {
     // A tool result is not a user message. Rewording the role breaks the
     // conversation rather than merely changing its shape.
-    let messages = vec![
-        ChatMessage::assistant_with_tool_calls(vec![vincents_llm::types::ToolCall::Function(
+    let messages = [ChatMessage::assistant_with_tool_calls(vec![vincents_llm::types::ToolCall::Function(
             vincents_llm::types::FunctionCall::Custom(vincents_llm::types::CustomFunctionCall {
                 id: Some("call_a".into()),
                 name: "get_weather".into(),
@@ -449,8 +448,7 @@ fn golden_tool_role_round_trip() {
         ChatMessage::Tool {
             tool_call_id: "call_a".into(),
             content: "12C".into(),
-        },
-    ];
+        }];
     let wire: Vec<Value> = messages.iter().map(ChatMessage::to_openai_json).collect();
     assert_eq!(wire[0]["role"], "assistant");
     assert!(wire[0]["content"].is_null(), "no text, not empty text");

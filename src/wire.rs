@@ -103,7 +103,7 @@ pub fn validate_request(
     // block on a non-streaming request is either ignored or rejected depending
     // on the provider, and `include_usage` is exactly the setting that decides
     // whether the caller ever learns what the request cost.
-    if parts.stream == false
+    if !parts.stream
         && (request.stream_options.is_some()
             || request.extra_params.contains_key("stream_options"))
     {
@@ -127,8 +127,8 @@ pub fn validate_request(
             field: Some("top_logprobs".to_string()),
         });
     }
-    if let Some(choice) = &request.tool_choice {
-        if let ToolChoice::Function { name } = choice {
+    if let Some(ToolChoice::Function { name }) = &request.tool_choice {
+        {
             // Naming a tool that is not offered — including when *no* tools are
             // offered — is a configuration error, not something to forward and
             // let the provider reject after a round trip.

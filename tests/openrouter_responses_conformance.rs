@@ -380,7 +380,7 @@ async fn a_responses_request_without_attribution_sends_none() {
         .expect("ok");
 
     let requests = server.received_requests().await.expect("recorded");
-    for (name, _) in requests[0].headers.iter() {
+    for name in requests[0].headers.keys() {
         let name = name.as_str().to_lowercase();
         assert!(
             !["http-referer", "x-openrouter-title", "x-session-id", "x-openrouter-trace"]

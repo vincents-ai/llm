@@ -17,6 +17,7 @@ use crate::RateLimitStatus;
 
 /// Anthropic Provider Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct AnthropicConfig {
     pub api_key: String,
     pub default_model: Option<String>,
@@ -25,15 +26,6 @@ pub struct AnthropicConfig {
     pub base_url: Option<String>,
 }
 
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            default_model: None,
-            base_url: None,
-        }
-    }
-}
 
 /// Anthropic Provider
 #[derive(Debug)]
@@ -539,7 +531,7 @@ fn anthropic_image(url: &str, model: &str) -> Result<Value> {
 
         let resp = self
             .client
-            .get(&format!("{}/v1/models", base))
+            .get(format!("{}/v1/models", base))
             .header("Content-Type", "application/json")
             .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -796,13 +788,11 @@ impl LLMProvider for AnthropicProvider {
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
 
-                loop {
-                    if let Some(pos) = buffer.find("\n") {
-                        let line = buffer[..pos].to_string();
+                while let Some(pos) = buffer.find("\n") {
+                    let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
 
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
+                        if let Some(data) = line.strip_prefix("data: ") {
                             if data.is_empty() {
                                 continue;
                             }
@@ -838,9 +828,6 @@ impl LLMProvider for AnthropicProvider {
                                 Err(_) => continue,
                             }
                         }
-                    } else {
-                        break;
-                    }
                 }
             }
 

@@ -18,6 +18,7 @@ use crate::responses::{
 
 /// Configuration for [`OpenAIResponsesProvider`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct OpenAIResponsesConfig {
     pub api_key: String,
     /// Sent on every request, including `/responses`.
@@ -54,22 +55,6 @@ pub struct OpenAIResponsesConfig {
     pub trace: Option<String>,
 }
 
-impl Default for OpenAIResponsesConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            organization_id: None,
-            project_id: None,
-            base_url: None,
-            default_model: None,
-            referrer: None,
-            title: None,
-            metadata: false,
-            session_id: None,
-            trace: None,
-        }
-    }
-}
 
 /// A client for OpenAI's `/responses` endpoint.
 #[derive(Debug, Clone)]
@@ -284,10 +269,10 @@ impl OpenAIResponsesProvider {
                 request_id,
             ));
         }
-        Ok(response.json().await.map_err(|e| LLMError::SerializationError {
+        response.json().await.map_err(|e| LLMError::SerializationError {
             message: e.to_string(),
             context: Some("failed to parse the /responses payload".to_string()),
-        })?)
+        })
     }
 
     /// Cancel a background response (§56).
@@ -315,10 +300,10 @@ impl OpenAIResponsesProvider {
                 None,
             ));
         }
-        Ok(response.json().await.map_err(|e| LLMError::SerializationError {
+        response.json().await.map_err(|e| LLMError::SerializationError {
             message: e.to_string(),
             context: Some("failed to parse the cancel payload".to_string()),
-        })?)
+        })
     }
 
     /// Delete a stored response.

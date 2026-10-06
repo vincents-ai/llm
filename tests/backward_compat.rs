@@ -20,7 +20,7 @@ fn the_common_constructors_still_take_bare_strings() {
     let _ = ChatMessage::system("be terse");
     let _ = ChatMessage::assistant("sure");
     let _ = ChatMessage::user(String::from("owned"));
-    let _ = ChatMessage::user(&String::from("borrowed"));
+    let _ = ChatMessage::user(String::from("borrowed"));
     let _: Req = ChatCompletionRequest {
         model: "gpt-4o".into(),
         messages: vec![ChatMessage::user("hi")],

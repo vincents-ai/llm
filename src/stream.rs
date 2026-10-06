@@ -63,8 +63,7 @@ pub fn parse_sse_stream(
             };
 
             buffer.push_str(&String::from_utf8_lossy(next.as_ref()));
-            loop {
-                let Some(position) = buffer.find('\n') else { break };
+            while let Some(position) = buffer.find('\n') {
                 let line: String = buffer.drain(..=position).collect();
                 let line = line.trim_end();
                 let Some(payload) = line.strip_prefix("data: ") else {
@@ -148,8 +147,8 @@ pub fn parse_sse_stream(
                                 .to_string();
 
                             let key = (choice_index, tool_index);
-                            if id.is_some() || name.is_some() || !arguments.is_empty() {
-                                if announced.insert(key) {
+                            if (id.is_some() || name.is_some() || !arguments.is_empty())
+                                && announced.insert(key) {
                                     yield Ok(ChatStreamEvent::ToolCallStart {
                                         choice_index,
                                         tool_index,
@@ -157,7 +156,6 @@ pub fn parse_sse_stream(
                                         name: name.clone(),
                                     });
                                 }
-                            }
                             // Fragments are still emitted after the start: a
                             // provider may repeat the id, and dropping the
                             // arguments that follow a repeat would corrupt the

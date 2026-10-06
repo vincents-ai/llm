@@ -130,7 +130,7 @@ impl OpenAIProvider {
 
         let mut request_builder = self
             .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .post(format!("{}/chat/completions", self.get_base_url()))
             .header("Content-Type", "application/json");
         request_builder = self.apply_account_headers(request_builder);
         let response = request_builder
@@ -243,7 +243,7 @@ impl OpenAIProvider {
     async fn send_chat_request(&self, body: Value) -> Result<Value> {
         let mut request = self
             .client
-            .post(&format!("{}/chat/completions", self.get_base_url()))
+            .post(format!("{}/chat/completions", self.get_base_url()))
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json");
         request = self.apply_account_headers(request);
@@ -389,7 +389,7 @@ impl OpenAIProvider {
     pub async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
         let mut req = self
             .client
-            .get(&format!("{}/models", self.get_base_url()))
+            .get(format!("{}/models", self.get_base_url()))
             .header("Content-Type", "application/json");
 
         if !self.config.api_key.is_empty() {

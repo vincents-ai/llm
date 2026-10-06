@@ -1179,6 +1179,7 @@ impl ServiceTier {
 /// A chat completion request
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ChatCompletionRequest {
     /// Model identifier (e.g., "gpt-4", "claude-3-opus")
     pub model: String,
@@ -1320,41 +1321,6 @@ pub struct ChatCompletionRequest {
     pub metadata: BTreeMap<String, String>,
 }
 
-impl Default for ChatCompletionRequest {
-    fn default() -> Self {
-        Self {
-            model: String::new(),
-            messages: Vec::new(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            n: None,
-            stream: None,
-            stop: Vec::new(),
-            presence_penalty: None,
-            frequency_penalty: None,
-            logit_bias: HashMap::new(),
-            user: None,
-            max_completion_tokens: None,
-            seed: None,
-            logprobs: None,
-            top_logprobs: None,
-            stream_options: None,
-            store: None,
-            prompt_cache_key: None,
-            response_format: None,
-            tools: None,
-            tool_choice: None,
-            parallel_tool_calls: None,
-            reasoning: None,
-            verbosity: None,
-            service_tier: None,
-            metadata: BTreeMap::new(),
-            extra_params: HashMap::new(),
-            cache_system: false,
-        }
-    }
-}
 
 /// A chat completion response
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2027,8 +1993,10 @@ pub struct ModelCapabilities {
 /// something the parsers quietly imply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CapabilitySource {
     /// Not determined. The booleans are defaults, not findings.
+    #[default]
     Unknown,
     /// Derived from a substring match against the model name. Weak, and
     /// explicitly not authoritative.
@@ -2088,11 +2056,6 @@ impl ModelCapabilities {
     }
 }
 
-impl Default for CapabilitySource {
-    fn default() -> Self {
-        CapabilitySource::Unknown
-    }
-}
 
 impl CapabilitySource {
     /// Whether the capabilities may be relied on for a routing decision.

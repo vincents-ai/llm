@@ -739,9 +739,11 @@ pub struct ResponseReasoningItem {
 /// The wire form is a bare string, so it is parsed as one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ResponseStatus {
     Queued,
     InProgress,
+    #[default]
     Completed,
     Failed,
     Cancelled,
@@ -782,11 +784,6 @@ impl<'de> Deserialize<'de> for ResponseStatus {
     }
 }
 
-impl Default for ResponseStatus {
-    fn default() -> Self {
-        ResponseStatus::Completed
-    }
-}
 
 impl ResponseStatus {
     pub fn is_terminal(&self) -> bool {

@@ -427,10 +427,11 @@ async fn a_malformed_frame_is_skipped_without_ending_the_stream() {
     // One bad frame must not end a live stream: the provider's terminator is
     // what ends it.
     let body = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         sse(&[frame("chatcmpl-11", "gpt-4o", 1, delta("before"))]),
         "data: {not valid json at all}\n\n",
-        format!("{}{}", sse(&[frame("chatcmpl-11", "gpt-4o", 1, delta("after"))]), "data: [DONE]\n\n"),
+        sse(&[frame("chatcmpl-11", "gpt-4o", 1, delta("after"))]),
+        "data: [DONE]\n\n",
     );
     let server = streaming(body).await;
 

@@ -305,11 +305,11 @@ mod tests {
 
             if let Some(pricing) = model.pricing {
                 assert!(
-                    pricing.prompt_tokens > 0.0 || pricing.prompt_tokens == 0.0,
+                    pricing.prompt_tokens >= 0.0,
                     "Pricing should be valid"
                 );
                 assert!(
-                    pricing.completion_tokens > 0.0 || pricing.completion_tokens == 0.0,
+                    pricing.completion_tokens >= 0.0,
                     "Pricing should be valid"
                 );
             }
@@ -373,7 +373,7 @@ mod tests {
         let mut models = provider.list_models().await.expect("Should list models");
 
         // Sort by context window descending
-        models.sort_by(|a, b| b.context_window.cmp(&a.context_window));
+        models.sort_by_key(|m| std::cmp::Reverse(m.context_window));
 
         // GPT-4-turbo has the largest context
         assert!(models[0].context_window >= 128000);

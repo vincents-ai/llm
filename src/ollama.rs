@@ -220,10 +220,11 @@ impl OllamaProvider {
         let client = reqwest::Client::new();
 
         Ok(Self {
+            // No `..Default::default()`: every field is named, and clippy 1.99
+            // flags a struct update that cannot take effect.
             config: OllamaConfig {
                 host: host.into(),
                 default_model: Some(model.into()),
-                ..Default::default()
             },
             client,
         })
@@ -259,7 +260,7 @@ impl OllamaProvider {
     pub async fn health_check(&self) -> Result<bool> {
         let response = self
             .client
-            .get(&format!("{}/api/version", self.get_base_url()))
+            .get(format!("{}/api/version", self.get_base_url()))
             .send()
             .await
             .map_err(|e| LLMError::HttpError {
@@ -275,7 +276,7 @@ impl OllamaProvider {
     async fn fetch_models_live(&self) -> Result<Vec<crate::types::FullModelInfo>> {
         let resp = self
             .client
-            .get(&format!("{}/api/tags", self.get_base_url()))
+            .get(format!("{}/api/tags", self.get_base_url()))
             .send()
             .await
             .map_err(|e| crate::error::LLMError::HttpError {
@@ -679,9 +680,8 @@ impl LLMProvider for OllamaProvider {
                 let chunk_str = String::from_utf8_lossy(&bytes_vec);
                 buffer.push_str(&chunk_str);
 
-                loop {
-                    if let Some(pos) = buffer.find("\n") {
-                        let line = buffer[..pos].to_string();
+                while let Some(pos) = buffer.find("\n") {
+                    let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
 
                         match serde_json::from_str::<serde_json::Value>(&line) {
@@ -713,9 +713,6 @@ impl LLMProvider for OllamaProvider {
                             }
                             Err(_) => continue,
                         }
-                    } else {
-                        break;
-                    }
                 }
             }
 

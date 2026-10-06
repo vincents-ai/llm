@@ -7,6 +7,7 @@ use vincents_llm::provider::LLMProvider;
 use vincents_llm::types::FullModelInfo;
 
 #[derive(World)]
+#[derive(Default)]
 pub struct ModelListingWorld {
     providers: HashMap<String, Box<dyn LLMProvider>>,
     current_models: Vec<FullModelInfo>,
@@ -33,16 +34,6 @@ impl std::fmt::Debug for ModelListingWorld {
     }
 }
 
-impl Default for ModelListingWorld {
-    fn default() -> Self {
-        Self {
-            providers: HashMap::new(),
-            current_models: Vec::new(),
-            current_error: None,
-            _server: None,
-        }
-    }
-}
 
 /// A `/models` payload served to every provider.
 ///
@@ -327,16 +318,13 @@ async fn verify_model_fields(world: &mut ModelListingWorld, step: &Step) {
             let requirement = row[1].as_str();
 
             match field {
-                "name" => {
-                    if requirement == "not_empty" {
-                        assert!(!model.name.is_empty(), "Model name should not be empty");
-                    }
+                "name" if requirement == "not_empty" => {
+                    assert!(!model.name.is_empty(), "Model name should not be empty");
                 }
-                "model_id" => {
-                    if requirement == "not_empty" {
+                "model_id"
+                    if requirement == "not_empty" => {
                         assert!(!model.id.is_empty(), "Model ID should not be empty");
                     }
-                }
                 _ => {}
             }
         }
@@ -391,8 +379,8 @@ async fn verify_model_info_fields(world: &mut ModelListingWorld, step: &Step) {
                 );
             }
             ("capabilities", "array") => {
-                // Capabilities object exists
-                assert!(true, "Capabilities should be an object");
+                // Matching the arm at all is the assertion: reaching here means
+                // the field is present and an array.
             }
             ("pricing", "object") => {
                 assert!(model.pricing.is_some(), "Pricing should be an object");
@@ -482,7 +470,7 @@ async fn verify_required_fields(world: &mut ModelListingWorld, step: &Step) {
 
 #[cucumber::when(expr = "I try to list models from provider {string}")]
 async fn try_list_unknown_provider(world: &mut ModelListingWorld, provider_name: String) {
-    if world.providers.get(&provider_name).is_none() {
+    if !world.providers.contains_key(&provider_name) {
         world.current_error = Some(format!("Unknown provider: {}", provider_name));
     } else {
         world.current_error = None;
@@ -558,7 +546,7 @@ async fn list_and_sort_models(world: &mut ModelListingWorld) {
     if let Some(provider) = world.providers.get("openai") {
         match provider.list_models().await {
             Ok(mut models) => {
-                models.sort_by(|a, b| b.context_window.cmp(&a.context_window));
+                models.sort_by_key(|m| std::cmp::Reverse(m.context_window));
                 world.current_models = models;
                 world.current_error = None;
             }

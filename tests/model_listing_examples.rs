@@ -176,7 +176,7 @@ mod examples {
         let mut models = provider.list_models().await.expect("Failed to list models");
 
         // Sort by context window (descending)
-        models.sort_by(|a, b| b.context_window.cmp(&a.context_window));
+        models.sort_by_key(|m| std::cmp::Reverse(m.context_window));
 
         println!("OpenAI Models Sorted by Context Window (Largest First):");
         println!("====================================================");

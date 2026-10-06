@@ -353,7 +353,7 @@ async fn supported_parameters_are_preserved_verbatim() {
     );
     // The booleans are derived from the same list.
     assert!(models[0].capabilities.function_calling);
-    assert_eq!(models[0].capabilities.source.is_authoritative(), true);
+    assert!(models[0].capabilities.source.is_authoritative());
 }
 
 // ── Streaming (§40, and the defects that were only ever on this path) ──────
@@ -495,7 +495,7 @@ async fn a_truncated_openrouter_stream_is_an_error_not_a_completion() {
 async fn routing_still_reaches_the_body_on_the_streaming_path() {
     // The streaming path built its body separately, which is exactly how the
     // two paths drifted. The extensions must not vanish when `stream: true`.
-    let server = streaming_server(format!("data: [DONE]\n\n")).await;
+    let server = streaming_server("data: [DONE]\n\n".to_string()).await;
     use futures::StreamExt;
     let mut p = provider(&server, |_| {});
     p.set_extensions(OpenRouterExtensions {

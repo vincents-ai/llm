@@ -275,7 +275,7 @@ impl CircuitBreaker {
 
             CircuitState::Open => {
                 // Check if timeout has expired → transition to HalfOpen
-                let opened_at = inner.opened_at.unwrap_or_else(|| Instant::now());
+                let opened_at = inner.opened_at.unwrap_or_else(Instant::now);
                 if opened_at.elapsed() >= self.config.timeout {
                     inner.state = CircuitState::HalfOpen;
                     inner.half_open_successes = 0;
@@ -388,7 +388,7 @@ impl CircuitBreaker {
             CircuitState::Closed => {
                 // Prune expired entries from the sliding window
                 let cutoff = now - self.config.window;
-                while inner.failure_window.front().map_or(false, |t| *t < cutoff) {
+                while inner.failure_window.front().is_some_and(|t| *t < cutoff) {
                     inner.failure_window.pop_front();
                 }
 

@@ -4,9 +4,17 @@
  * A multi-LLM provider abstraction layer for Rust applications.
  * Provides a unified interface for OpenAI, Claude, Gemini, Ollama, and OpenRouter.
  */
+
+// `#[async_trait]` emits `#[must_use]` on the futures it generates, and clippy
+// 1.99 flags *that* as a redundant `double_must_use` -- an expansion we do not
+// write and cannot edit. Allowed crate-wide because it fires on every async
+// trait method rather than at any one site.
+#![allow(clippy::double_must_use)]
+
 #![allow(dead_code)]
 
 pub mod config;
+
 pub mod error;
 pub mod types;
 

@@ -16,21 +16,13 @@ use crate::CostEstimate;
 use crate::RateLimitStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct GeminiConfig {
     pub api_key: String,
     pub default_model: Option<String>,
     pub base_url: Option<String>,
 }
 
-impl Default for GeminiConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            default_model: None,
-            base_url: None,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct GeminiProvider {
