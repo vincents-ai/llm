@@ -830,3 +830,127 @@ fn every_field_the_brief_names_as_missing_is_first_class() {
     assert_eq!(built["messages"][0]["role"], "developer");
     assert!(built["messages"][1]["content"].is_array());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §41: no provider guesses a price from a model name
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn no_provider_prices_a_model_by_substring() {
+    use vincents_llm::provider::LLMProvider;
+
+    // Every provider used to carry its own `match model { contains(..) => .. }`
+    // table. This walks the three that had one and asserts the property that
+    // matters: a cheap model is priced cheaply, and an unknown one is not
+    // silently given some other model's price.
+    for (provider, cheap, dear, unknown) in [
+        (
+            "anthropic",
+            "claude-3-haiku-20240307",
+            "claude-3-opus-20240229",
+            "claude-9-ultra-20991231",
+        ),
+        (
+            "gemini",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-42-ultra",
+        ),
+        (
+            "openrouter",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "someorg/model-released-this-morning",
+        ),
+    ] {
+        let estimate = |model: &'static str| async move {
+            match provider {
+                "anthropic" => {
+                    let p = vincents_llm::anthropic::AnthropicProvider::new("k").await?;
+                    p.estimate_cost(&ChatCompletionRequest {
+                        model: model.into(),
+                        messages: vec![ChatMessage::user("hello")],
+                        max_tokens: Some(1_000),
+                        ..Default::default()
+                    })
+                    .await
+                }
+                "gemini" => {
+                    let p = vincents_llm::gemini::GeminiProvider::new("k").await?;
+                    p.estimate_cost(&ChatCompletionRequest {
+                        model: model.into(),
+                        messages: vec![ChatMessage::user("hello")],
+                        max_tokens: Some(1_000),
+                        ..Default::default()
+                    })
+                    .await
+                }
+                _ => {
+                    let p = vincents_llm::openrouter::OpenRouterProvider::new("k").await?;
+                    p.estimate_cost(&ChatCompletionRequest {
+                        model: model.into(),
+                        messages: vec![ChatMessage::user("hello")],
+                        max_tokens: Some(1_000),
+                        ..Default::default()
+                    })
+                    .await
+                }
+            }
+        };
+
+        let cheap_cost = estimate(cheap).await.expect("cheap model prices").total_cost;
+        let dear_cost = estimate(dear).await.expect("dear model prices").total_cost;
+        assert!(
+            cheap_cost < dear_cost,
+            "{provider}: {cheap} ({cheap_cost}) must be cheaper than {dear} ({dear_cost})"
+        );
+
+        let unknown_cost = estimate(unknown).await.expect("unknown prices").total_cost;
+        assert_eq!(
+            unknown_cost, 0.0,
+            "{provider}: §41 forbids applying an unrelated model's price to {unknown}; \\
+             a zero estimate is visible, a guessed number looks like a real quote"
+        );
+    }
+}
+
+#[test]
+fn a_namespaced_model_never_falls_through_to_a_shorter_one() {
+    // `openai/gpt-4o-mini` strips to `gpt-4o-mini`, which must match *itself*.
+    // Stripping the prefix and then prefix-matching would price the cheapest
+    // common model at the dear one's rate -- the bug this catalog replaced.
+    use vincents_llm::pricing::price_for;
+    let mini = price_for("openai/gpt-4o-mini").expect("namespaced mini resolves");
+    let full = price_for("openai/gpt-4o").expect("namespaced full resolves");
+    assert!(
+        mini.prompt_tokens < full.prompt_tokens / 10.0,
+        "mini {} vs full {}",
+        mini.prompt_tokens,
+        full.prompt_tokens
+    );
+    // And an unknown model under a known namespace still resolves to nothing.
+    assert!(price_for("openai/model-released-this-morning").is_none());
+}
+
+#[tokio::test]
+async fn capability_is_not_inferred_from_a_model_name() {
+    use vincents_llm::provider::LLMProvider;
+
+    let gemini = vincents_llm::gemini::GeminiProvider::new("k").await.expect("provider");
+
+    // Known models answer from the catalog.
+    assert!(
+        gemini.supports_function_calling("gemini-1.5-pro"),
+        "a catalogued model answers from the catalog"
+    );
+    // The substring matcher this replaced would have said `true` for a future
+    // model whose name contained "flash" and for one containing "1.5".
+    assert!(
+        !gemini.supports_function_calling("gemini-9-flash-20991231"),
+        "§40: a name matching an old substring is not evidence of a capability"
+    );
+    assert!(
+        !gemini.supports_function_calling("gemini-42-ultra"),
+        "an unknown model supports nothing we can vouch for"
+    );
+}

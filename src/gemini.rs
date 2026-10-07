@@ -761,9 +761,19 @@ impl LLMProvider for GeminiProvider {
         Ok(Self::build_response(json, model))
     }
 
+    /// Whether the catalog says this model takes tool definitions.
+    ///
+    /// §40 forbids inferring a capability from the model *name*. This used to be
+    /// `contains("1.5") || contains("flash") || ...`, which reported tool
+    /// support for any future Gemini whose name happened to match -- and
+    /// reported nothing for a model that does support tools.
+    ///
+    /// The trait returns `bool`, so "unknown" has to mean `false`. That is a
+    /// lower bound and is documented as one: it can under-report a capability but
+    /// never invents one. A caller that needs the distinction should ask
+    /// [`crate::pricing::descriptor_for`] directly.
     fn supports_function_calling(&self, model: &str) -> bool {
-        let m = model.to_lowercase();
-        m.contains("1.5") || m.contains("2.0") || m.contains("flash") || m.contains("gemini-pro")
+        crate::pricing::supports(model, "function_calling")
     }
 
     async fn rate_limit_status(&self) -> Result<RateLimitStatus> {
@@ -784,19 +794,32 @@ impl LLMProvider for GeminiProvider {
             request.model.clone()
         };
 
-        let input_cost_per_million = match model.as_str() {
-            m if m.contains("flash") => 0.075,
-            m if m.contains("pro") => 1.25,
-            m if m.contains("1.0") => 0.5,
-            _ => 1.25,
-        };
+        // Exact match against the versioned catalog.
+        //
+        // This was a `match` on `contains(..)`. Two problems: the arms were
+        // ordered so that `gemini-1.0-pro` matched `contains("pro")` before it
+        // could reach the `1.0` arm, and the `_ =>` arm priced *any*
+        // unrecognised model as the middle tier. §41: "Never silently apply an
+        // unrelated fallback model price to an unknown model." An unknown model
+        // reports zero, which is visible.
+        let pricing = crate::pricing::price_for(&model);
+        let input_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.prompt_tokens * 1_000.0)
+            .unwrap_or(0.0);
+        let output_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.completion_tokens * 1_000.0)
+            .unwrap_or(0.0);
 
-        let output_cost_per_million = match model.as_str() {
-            m if m.contains("flash") => 0.30,
-            m if m.contains("pro") => 5.0,
-            m if m.contains("1.0") => 1.5,
-            _ => 5.0,
-        };
+        if pricing.is_none() {
+            tracing::debug!(
+                model = %model,
+                provider = "gemini",
+                "no catalog price for this model; reporting a zero estimate rather than \
+                 guessing an unrelated model's price"
+            );
+        }
 
         let estimated_prompt_tokens = request
             .messages

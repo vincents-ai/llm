@@ -948,19 +948,32 @@ impl LLMProvider for AnthropicProvider {
             request.model.clone()
         };
 
-        let input_cost_per_million = match model.as_str() {
-            m if m.contains("opus") => 15.0,
-            m if m.contains("sonnet") => 3.0,
-            m if m.contains("haiku") => 0.25,
-            _ => 3.0,
-        };
+        // Exact match against the versioned catalog.
+        //
+        // This was a `match` on `contains(..)`. Two problems: the arms were
+        // ordered so that `gemini-1.0-pro` matched `contains("pro")` before it
+        // could reach the `1.0` arm, and the `_ =>` arm priced *any*
+        // unrecognised model as the middle tier. §41: "Never silently apply an
+        // unrelated fallback model price to an unknown model." An unknown model
+        // reports zero, which is visible.
+        let pricing = crate::pricing::price_for(&model);
+        let input_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.prompt_tokens * 1_000.0)
+            .unwrap_or(0.0);
+        let output_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.completion_tokens * 1_000.0)
+            .unwrap_or(0.0);
 
-        let output_cost_per_million = match model.as_str() {
-            m if m.contains("opus") => 75.0,
-            m if m.contains("sonnet") => 15.0,
-            m if m.contains("haiku") => 1.25,
-            _ => 15.0,
-        };
+        if pricing.is_none() {
+            tracing::debug!(
+                model = %model,
+                provider = "anthropic",
+                "no catalog price for this model; reporting a zero estimate rather than \
+                 guessing an unrelated model's price"
+            );
+        }
 
         let estimated_prompt_tokens = request
             .messages

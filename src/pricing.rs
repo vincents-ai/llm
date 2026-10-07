@@ -194,6 +194,31 @@ fn catalog_entries() -> Vec<Descriptor> {
         pricing: price(0.0008, 0.004),
     },
     Descriptor {
+        // Gemini. Added because `GeminiProvider::estimate_cost` was matching
+        // `contains("pro")` / `contains("flash")` against the model name, which
+        // prices any future Gemini by substring and -- because the arms were
+        // ordered -- priced `gemini-1.0-pro` as `gemini-1.5-pro`.
+        id: "gemini-1.5-pro",
+        context_window: 2_097_152,
+        max_output_tokens: 8_192,
+        capabilities: text_vision(true, 2_097_152, 8_192),
+        pricing: price(0.00125, 0.005),
+    },
+    Descriptor {
+        id: "gemini-1.5-flash",
+        context_window: 1_048_576,
+        max_output_tokens: 8_192,
+        capabilities: text_vision(true, 1_048_576, 8_192),
+        pricing: price(0.000075, 0.0003),
+    },
+    Descriptor {
+        id: "gemini-1.0-pro",
+        context_window: 32_768,
+        max_output_tokens: 8_192,
+        capabilities: text_vision(true, 32_768, 8_192),
+        pricing: price(0.0005, 0.0015),
+    },
+    Descriptor {
         id: "claude-3-haiku-20240307-latest",
         context_window: 200_000,
         max_output_tokens: 4_096,
