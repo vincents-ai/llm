@@ -215,7 +215,18 @@ static CATALOG: std::sync::LazyLock<Vec<Descriptor>> = std::sync::LazyLock::new(
 /// `gpt-4-turbo` are different models with different prices, and a lookup that
 /// treated one as the other would bill a customer incorrectly.
 pub fn descriptor_for(model: &str) -> Option<&'static Descriptor> {
-    CATALOG.iter().find(|d| d.id == model)
+    if let Some(exact) = CATALOG.iter().find(|d| d.id == model) {
+        return Some(exact);
+    }
+    // Routed providers namespace their models: OpenRouter calls the same model
+    // `openai/gpt-4o` where the catalog says `gpt-4o`.
+    //
+    // The prefix is stripped and the *remainder* still has to match a catalog id
+    // exactly. Stripping alone would reintroduce the substring guessing this
+    // catalog was built to remove -- `openai/gpt-4o-mini` must not fall through
+    // to `gpt-4o`.
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    CATALOG.iter().find(|d| d.id == bare)
 }
 
 /// The catalog as an owned map, for callers that want to merge with live data.

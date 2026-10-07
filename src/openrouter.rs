@@ -1060,42 +1060,51 @@ impl LLMProvider for OpenRouterProvider {
             request.model.clone()
         };
 
-        // OpenRouter pricing varies by model, use conservative estimates
-        let input_cost_per_million = match model.as_str() {
-            m if m.contains("gpt-4o") => 5.0,
-            m if m.contains("gpt-4o-mini") => 0.15,
-            m if m.contains("claude-3.5-sonnet") => 3.0,
-            m if m.contains("claude-3-opus") => 15.0,
-            m if m.contains("gemini") => 1.25,
-            m if m.contains("llama") => 0.5,
-            m if m.contains("deepseek") => 0.14,
-            m if m.contains("mistral") => 0.25,
-            _ => 10.0,
-        };
+        // Exact-match against the versioned catalog, never a substring.
+        //
+        // This used to be a hardcoded `match` on `contains(..)`, which had two
+        // billing defects:
+        //
+        // The arms were in the wrong order -- `contains("gpt-4o")` came before
+        // `contains("gpt-4o-mini")`, so gpt-4o-mini matched the first arm and was
+        // priced at 5.0/15.0 instead of 0.15/0.6. A 33x overstatement on the
+        // cheapest common model.
+        //
+        // And the `_ =>` arm applied a price to *any* unrecognised model. §41 is
+        // explicit: "Never silently apply an unrelated fallback model price to an
+        // unknown model." An unknown model now gets a zero estimate, which the
+        // wrapper treats as "no budget consumed" -- visible, rather than a number
+        // that looks like a real quote.
+        let pricing = crate::pricing::price_for(&model);
+        let input_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.prompt_tokens * 1_000.0)
+            .unwrap_or(0.0);
+        let output_cost_per_million = pricing
+            .as_ref()
+            .map(|p| p.completion_tokens * 1_000.0)
+            .unwrap_or(0.0);
 
-        let output_cost_per_million = match model.as_str() {
-            m if m.contains("gpt-4o") => 15.0,
-            m if m.contains("gpt-4o-mini") => 0.6,
-            m if m.contains("claude-3.5-sonnet") => 15.0,
-            m if m.contains("claude-3-opus") => 75.0,
-            m if m.contains("gemini") => 5.0,
-            m if m.contains("llama") => 1.5,
-            m if m.contains("deepseek") => 0.28,
-            m if m.contains("mistral") => 0.25,
-            _ => 30.0,
-        };
+        if pricing.is_none() {
+            tracing::debug!(
+                model = %model,
+                "no catalog price for this model; reporting a zero estimate rather than \
+                 guessing an unrelated model's price"
+            );
+        }
 
+        // ~4 characters per token is the usual English approximation. It is an
+        // approximation, and the field it feeds is `input_tokens` on an *estimate*
+        // -- the real count arrives with the response.
         let estimated_prompt_tokens = request
             .messages
             .iter()
             .map(|m| m.content().map(|c| c.len() / 4).unwrap_or(10))
             .sum::<usize>() as u32;
-
         let estimated_completion_tokens = request.max_tokens.unwrap_or(1000);
 
         let input_cost = estimated_prompt_tokens as f64 * input_cost_per_million / 1_000_000.0;
-        let output_cost =
-            estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
+        let output_cost = estimated_completion_tokens as f64 * output_cost_per_million / 1_000_000.0;
 
         Ok(CostEstimate {
             input_cost,

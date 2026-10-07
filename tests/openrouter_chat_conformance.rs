@@ -709,3 +709,71 @@ async fn unset_extension_fields_are_omitted_rather_than_null() {
         assert!(body.get(field).is_none(), "'{field}' should be absent: {body}");
     }
 }
+
+// ── §41: no unrelated fallback price for an unknown model ────────────────
+
+#[tokio::test]
+async fn pricing_is_exact_match_and_never_a_substring_guess() {
+    use vincents_llm::provider::LLMProvider;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+    let p = provider(&server, |c| {
+        c.default_model = Some("openai/gpt-4o-mini".into());
+    });
+
+    // The old table matched `contains("gpt-4o")` *before* `contains("gpt-4o-mini")`,
+    // so the cheapest common model matched the first arm and was priced at 5.0/15.0
+    // instead of 0.15/0.6 -- a 33x overstatement that fed quota admission.
+    // `request()` pins a model, so each case names its own -- the point of the
+    // test is which model is priced.
+    let mini = p
+        .estimate_cost(&ChatCompletionRequest {
+            model: "openai/gpt-4o-mini".into(),
+            ..request()
+        })
+        .await
+        .expect("estimate");
+    let full = p
+        .estimate_cost(&request())
+        .await
+        .expect("estimate");
+
+    assert!(
+        mini.total_cost < full.total_cost / 10.0,
+        "gpt-4o-mini ({} ) must be far cheaper than gpt-4o ({} )",
+        mini.total_cost,
+        full.total_cost
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_model_gets_no_estimate_rather_than_a_substituted_price() {
+    use vincents_llm::provider::LLMProvider;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion_body("ok")))
+        .mount(&server)
+        .await;
+
+    let p = provider(&server, |_| {});
+    let estimate = p
+        .estimate_cost(&ChatCompletionRequest {
+            model: "a-model-released-this-morning".into(),
+            ..request()
+        })
+        .await
+        .expect("estimate");
+
+    assert_eq!(
+        estimate.total_cost, 0.0,
+        "§41: never apply an unrelated model's price to an unknown model -- a zero \\
+         estimate is visible, a guessed number looks like a real quote"
+    );
+}
