@@ -197,48 +197,9 @@ impl OpenAIProvider {
     }
 
     fn parse_assistant_message(msg: &Value) -> ChatMessage {
-        let content = msg
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string());
-
-        let tool_calls = msg
-            .get("tool_calls")
-            .and_then(|tc| tc.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tc| {
-                        let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                        let func = tc.get("function")?;
-                        let name = func.get("name")?.as_str()?.to_string();
-                        let arguments = func
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        Some(ToolCall::Function(FunctionCall::Custom(
-                            CustomFunctionCall {
-                                id,
-                                name,
-                                arguments,
-                            },
-                        )))
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-        let tool_calls = tool_calls.filter(|t| !t.is_empty());
-
-        // Parsed from the wire as text. A provider can return multimodal parts
-        // in an assistant turn, but the common case is text, and guessing at
-        // which part is "the" text of a mixed reply would be a silent loss.
-        let content = content.map(MessageContent::Text);
-        ChatMessage::Assistant {
-            content,
-            tool_calls,
-            name: None,
-        }
+        crate::wire::parse_assistant_message(msg)
     }
+
 
     async fn send_chat_request(&self, body: Value) -> Result<Value> {
         let mut request = self

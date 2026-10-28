@@ -40,7 +40,10 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::LLMError;
-use crate::types::{ChatCompletionRequest, ToolChoice, ToolDefinition};
+use crate::types::{
+    ChatCompletionRequest, ChatMessage, CustomFunctionCall, FunctionCall, MessageContent,
+    ToolCall, ToolChoice, ToolDefinition,
+};
 
 /// The inputs to one request body.
 pub struct ChatRequestParts<'a> {
@@ -773,5 +776,59 @@ mod modern_parameter_tests {
             }
             other => panic!("expected a configuration error, got {other:?}"),
         }
+    }
+}
+
+
+/// Parse an assistant message from an OpenAI-shaped response body.
+///
+/// Shared by every provider that speaks this dialect. It lived in the OpenAI
+/// provider and was not used by OpenRouter's own response mapping, which built
+/// `ChatMessage::assistant(content)` instead — a helper that hard-codes
+/// `tool_calls: None`. The result was a response with `finish_reason:
+/// "tool_calls"`, a populated `tool_calls` array, and a typed message with no
+/// calls at all: every tool-calling step through OpenRouter silently degraded
+/// to a model that "never calls tools".
+pub(crate) fn parse_assistant_message(msg: &Value) -> ChatMessage {
+    let content = msg
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+
+    let tool_calls = msg
+        .get("tool_calls")
+        .and_then(|tc| tc.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|tc| {
+                    let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let func = tc.get("function")?;
+                    let name = func.get("name")?.as_str()?.to_string();
+                    let arguments = func
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    Some(ToolCall::Function(FunctionCall::Custom(
+                        CustomFunctionCall {
+                            id,
+                            name,
+                            arguments,
+                        },
+                    )))
+                })
+                .collect::<Vec<_>>()
+        });
+
+    let tool_calls = tool_calls.filter(|t| !t.is_empty());
+
+    // Parsed from the wire as text. A provider can return multimodal parts
+    // in an assistant turn, but the common case is text, and guessing at
+    // which part is "the" text of a mixed reply would be a silent loss.
+    let content = content.map(MessageContent::Text);
+    ChatMessage::Assistant {
+        content,
+        tool_calls,
+        name: None,
     }
 }

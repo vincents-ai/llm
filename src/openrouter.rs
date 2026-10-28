@@ -557,11 +557,9 @@ impl OpenRouterProvider {
                 request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
+        // `apply_common_headers` already applies `default_route`; setting it
+        // again here sent `OpenRouter-Router` twice on every request.
         request_builder = self.apply_common_headers(request_builder);
-
-        if let Some(route) = &self.config.default_route {
-            request_builder = request_builder.header("OpenRouter-Router", route);
-        }
 
         let response =
             request_builder
@@ -872,13 +870,9 @@ impl LLMProvider for OpenRouterProvider {
                 request_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
-        // Add referrer for credit tracking
+        // Attribution and routing headers, in one place: the route is applied
+        // by `apply_common_headers`, and setting it again here duplicated it.
         request_builder = self.apply_common_headers(request_builder);
-
-        // Add route for provider routing
-        if let Some(route) = &self.config.default_route {
-            request_builder = request_builder.header("OpenRouter-Router", route);
-        }
 
         let response =
             request_builder
@@ -976,7 +970,11 @@ impl LLMProvider for OpenRouterProvider {
                         name: None,
                     },
                     "user" => ChatMessage::user(content),
-                    _ => ChatMessage::assistant(content),
+                    // Not `ChatMessage::assistant(content)`: that helper sets
+                    // `tool_calls: None`, so a reply that *was* a tool call
+                    // arrived as an empty assistant turn. Parse the message the
+                    // way the OpenAI provider does, from the shared function.
+                    _ => crate::wire::parse_assistant_message(msg),
                 };
 
                 Choice {

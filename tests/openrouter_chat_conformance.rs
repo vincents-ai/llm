@@ -65,12 +65,26 @@ async fn body_of(server: &MockServer) -> Value {
     serde_json::from_slice(&requests[0].body).expect("the body must be JSON")
 }
 
+/// Every request header, with repeated values joined by commas.
+///
+/// `HeaderValues` is multi-valued: a comma-separated value arrives as several
+/// entries, and reading only the first one made a correctly-sent
+/// `X-OpenRouter-Categories: cli-agent,personal-agent` look truncated to
+/// `cli-agent`. Reading the first value of a list header is not reading the
+/// header.
 async fn headers_of(server: &MockServer) -> BTreeMap<String, String> {
     let requests = server.received_requests().await.expect("recorded");
-    requests[0]
-        .headers
-        .iter()
-        .map(|(k, v)| (k.as_str().to_lowercase(), v.as_str().to_string()))
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, values) in requests[0].headers.iter() {
+        let key = name.as_str().to_lowercase();
+        for value in values.iter() {
+            out.entry(key.clone())
+                .or_default()
+                .push(value.as_str().to_string());
+        }
+    }
+    out.into_iter()
+        .map(|(k, v)| (k, v.join(",")))
         .collect()
 }
 
@@ -265,6 +279,64 @@ async fn categories_and_visibility_are_sent_when_configured() {
         headers.get("x-openrouter-app-visibility").map(String::as_str),
         Some("hidden")
     );
+}
+
+#[tokio::test]
+async fn tool_calls_in_the_response_reach_the_caller() {
+    // The bug this pins: a reply with `finish_reason: "tool_calls"` and a
+    // populated `tool_calls` array was mapped to an assistant message with
+    // `tool_calls: None`. Every tool-calling step through OpenRouter then looked
+    // like a model that answers in prose, and the loop gave up.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "gen-tool", "object": "chat.completion", "created": 1,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "new_file",
+                            "arguments": "{\"path\": \"a.txt\", \"content\": \"x\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+        })))
+        .mount(&server)
+        .await;
+
+    let response = provider(&server, |_| {})
+        .chat_completion(request())
+        .await
+        .expect("request succeeds");
+
+    let message = &response.choices[0].message;
+    match message {
+        vincents_llm::types::ChatMessage::Assistant { tool_calls, .. } => {
+            let calls = tool_calls.as_ref().expect("tool calls must survive parsing");
+            assert_eq!(calls.len(), 1, "one call was returned");
+            match &calls[0] {
+                vincents_llm::types::ToolCall::Function(
+                    vincents_llm::types::FunctionCall::Custom(custom),
+                ) => {
+                    assert_eq!(custom.name, "new_file");
+                    assert!(custom.arguments.contains("a.txt"));
+                }
+                other => panic!("unexpected call shape: {other:?}"),
+            }
+        }
+        other => panic!("expected an assistant message, got {other:?}"),
+    }
 }
 
 #[tokio::test]
