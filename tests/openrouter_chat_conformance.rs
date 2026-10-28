@@ -241,6 +241,33 @@ async fn attribution_headers_come_from_configuration() {
 }
 
 #[tokio::test]
+async fn categories_and_visibility_are_sent_when_configured() {
+    // Marketplace listing is decided by these two headers, and both are
+    // optional: OpenRouter drops unrecognised categories without an error, so
+    // nothing else would ever disclose a typo.
+    let server = server().await;
+    provider(&server, |c| {
+        c.referrer = Some("https://example.com".into());
+        c.title = Some("Example App".into());
+        c.categories = Some("cli-agent,personal-agent".into());
+        c.app_visibility = Some("hidden".into());
+    })
+    .chat_completion(request())
+    .await
+    .expect("request succeeds");
+
+    let headers = headers_of(&server).await;
+    assert_eq!(
+        headers.get("x-openrouter-categories").map(String::as_str),
+        Some("cli-agent,personal-agent")
+    );
+    assert_eq!(
+        headers.get("x-openrouter-app-visibility").map(String::as_str),
+        Some("hidden")
+    );
+}
+
+#[tokio::test]
 async fn routing_metadata_is_opt_in() {
     let server = server().await;
     provider(&server, |c| c.metadata = true)

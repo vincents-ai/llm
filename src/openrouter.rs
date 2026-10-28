@@ -345,6 +345,19 @@ pub struct OpenRouterConfig {
     /// parameter would mean every call site could set it differently, which is
     /// the opposite of what attribution is for (§34).
     pub title: Option<String>,
+    /// `X-OpenRouter-Categories` — marketplace categories.
+    ///
+    /// A comma-separated list of up to two recognised categories (for example
+    /// `cli-agent,personal-agent`). OpenRouter uses these to list the app under
+    /// the right headings; unrecognised values are dropped without an error, so
+    /// a typo here is silent. Optional: attribution works without it.
+    pub categories: Option<String>,
+    /// `X-OpenRouter-App-Visibility`.
+    ///
+    /// `hidden` keeps a new app out of the public rankings and marketplace while
+    /// attribution and private analytics keep working. Only honoured when the
+    /// request creates the app; an existing app keeps its visibility.
+    pub app_visibility: Option<String>,
     /// Ask for routing metadata, via `X-OpenRouter-Metadata` (§36).
     ///
     /// Opt-in because the response grows. The data is worth having for the model
@@ -468,6 +481,12 @@ impl OpenRouterProvider {
         }
         if let Some(title) = &self.config.title {
             builder = builder.header("X-OpenRouter-Title", title);
+        }
+        if let Some(categories) = &self.config.categories {
+            builder = builder.header("X-OpenRouter-Categories", categories);
+        }
+        if let Some(visibility) = &self.config.app_visibility {
+            builder = builder.header("X-OpenRouter-App-Visibility", visibility);
         }
         if self.config.metadata {
             builder = builder.header("X-OpenRouter-Metadata", "enabled");
