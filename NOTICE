@@ -1,0 +1,19 @@
+vincents-llm licensing
+======================
+
+vincents-llm is available under either of two licences:
+
+1. The GNU Affero General Public License, version 3.0 or (at your option) any
+   later version (AGPL-3.0-or-later). The full text is in the LICENSE file in
+   this repository.
+
+2. A commercial licence from the copyright holder, Vincents.ai. Commercial
+   terms are granted by the copyright holder on request; this repository does
+   not state them.
+
+The workspace manifest declares this choice as:
+
+    license = "AGPL-3.0-or-later OR LicenseRef-Commercial"
+
+The SPDX identifier LicenseRef-Commercial is a local reference; it is not an
+SPDX-listed licence.

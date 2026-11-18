@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Multi-LLM provider abstraction for Vincents.ai - unified interface for OpenAI, Claude, Gemini, Ollama, OpenRouter"
 authors = ["Vincents.ai"]
+license = "AGPL-3.0-or-later OR LicenseRef-Commercial"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
