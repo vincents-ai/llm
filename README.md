@@ -4,9 +4,9 @@ Multi-provider LLM abstraction for Rust. Unified interface for OpenAI, Anthropic
 
 ## License
 
-This software is proprietary and commercially licensed. All rights reserved by Vincents.ai.
-Unauthorized use, copying, modification, or distribution is strictly prohibited.
-Contact [Vincents.ai](https://vincents.ai) for licensing enquiries.
+vincents-llm is dual-licensed: AGPL-3.0-or-later, or a commercial licence from
+the copyright holder. See [NOTICE](NOTICE) for the terms and the SPDX
+declaration; the full AGPL text is in [LICENSE](LICENSE).
 
 ---
 
