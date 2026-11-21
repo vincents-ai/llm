@@ -606,10 +606,83 @@ impl CacheControl {
 }
 
 /// A tool call from the model
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToolCall {
     Function(FunctionCall),
+}
+
+// Hand-written because the OpenAI envelope and the derived representation
+// disagree. The wire is
+//
+//     {"id": "call_1", "type": "function",
+//      "function": {"name": "done", "arguments": "{}"}}
+//
+// — one `type`, and the payload under `function`. The derived representation
+// of `ToolCall` + `FunctionCall` is two stacked internally-tagged enums, so
+// the inner one looks for a *second* `type` and finds `"function"`, which is
+// not one of its variants. Serde then rejects the whole message. Providers that
+// parsed the response through `wire::parse_assistant_message` were unaffected;
+// anything that deserialised `ChatMessage` directly lost every tool call and
+// reported `finish_reason: "tool_calls"` with no calls attached.
+impl<'de> Deserialize<'de> for ToolCall {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| D::Error::custom("a tool call must be a JSON object"))?;
+
+        let id = object
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(str::to_string);
+
+        match object.get("type").and_then(|kind| kind.as_str()) {
+            Some("function") => {
+                let function = object
+                    .get("function")
+                    .and_then(|function| function.as_object())
+                    .ok_or_else(|| D::Error::custom("a function tool call has no `function` object"))?;
+
+                let name = function
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .ok_or_else(|| D::Error::custom("a function tool call has no `name`"))?
+                    .to_string();
+
+                // `arguments` is a JSON-encoded string in the OpenAI schema,
+                // but some compatible servers send the object itself.
+                let arguments = match function.get("arguments") {
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(other) => other.to_string(),
+                    None => "{}".to_string(),
+                };
+
+                Ok(ToolCall::Function(FunctionCall::Custom(
+                    CustomFunctionCall {
+                        id,
+                        name,
+                        arguments,
+                    },
+                )))
+            }
+            Some("code_interpreter") => serde_json::from_value(value)
+                .map(|call| ToolCall::Function(FunctionCall::Code(call)))
+                .map_err(D::Error::custom),
+            Some("retrieval") => serde_json::from_value(value)
+                .map(|call| ToolCall::Function(FunctionCall::Retrieval(call)))
+                .map_err(D::Error::custom),
+            Some(other) => Err(D::Error::custom(format!(
+                "unsupported tool call type `{other}`"
+            ))),
+            None => Err(D::Error::missing_field("type")),
+        }
+    }
 }
 
 /// A function call requested by the model
