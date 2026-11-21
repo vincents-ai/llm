@@ -7,6 +7,7 @@
 //! `ChatMessage`, and the caller saw `finish_reason: "tool_calls"` with no
 //! calls attached.
 
+use serde::Deserialize;
 use serde_json::json;
 use vincents_llm::types::{ChatMessage, FunctionCall, ToolCall};
 
@@ -91,4 +92,25 @@ fn a_message_without_tool_calls_is_unchanged() {
         ChatMessage::Assistant { tool_calls, .. } => assert!(tool_calls.is_none()),
         other => panic!("expected an assistant message, got {other:?}"),
     }
+}
+
+#[test]
+fn a_tool_call_round_trips_through_serde() {
+    let original = ChatMessage::deserialize(serde_json::json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "done", "arguments": "{}" }
+        }]
+    }))
+    .expect("the wire form must parse");
+
+    let encoded = serde_json::to_value(&original).expect("it must serialize");
+    println!("encoded: {encoded}");
+
+    let decoded: ChatMessage =
+        serde_json::from_value(encoded).expect("what we serialize must parse back");
+    assert_eq!(decoded, original);
 }

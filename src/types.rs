@@ -606,25 +606,64 @@ impl CacheControl {
 }
 
 /// A tool call from the model
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+///
+/// Both `Serialize` and `Deserialize` are hand-written because the OpenAI
+/// envelope and the derived representation disagree. The wire is:
+///
+/// ```json
+/// {"id": "call_1", "type": "function",
+///  "function": {"name": "done", "arguments": "{}"}}
+/// ```
+///
+/// — one `type`, and the payload under `function`. Deriving both traits on
+/// `ToolCall` and on the internally-tagged `FunctionCall` produced two stacked
+/// tags: reading looked for a second `type` and found `"function"`, which is
+/// not a `FunctionCall` variant, so the whole message failed; writing emitted
+/// `{"type":"function","type":"custom",…}`, and the last key won. The result
+/// was a type that could neither parse a response nor round-trip a
+/// `ChatMessage` through serde.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ToolCall {
     Function(FunctionCall),
 }
 
-// Hand-written because the OpenAI envelope and the derived representation
-// disagree. The wire is
-//
-//     {"id": "call_1", "type": "function",
-//      "function": {"name": "done", "arguments": "{}"}}
-//
-// — one `type`, and the payload under `function`. The derived representation
-// of `ToolCall` + `FunctionCall` is two stacked internally-tagged enums, so
-// the inner one looks for a *second* `type` and finds `"function"`, which is
-// not one of its variants. Serde then rejects the whole message. Providers that
-// parsed the response through `wire::parse_assistant_message` were unaffected;
-// anything that deserialised `ChatMessage` directly lost every tool call and
-// reported `finish_reason: "tool_calls"` with no calls attached.
+impl Serialize for ToolCall {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error as _;
+
+        let value = match self {
+            ToolCall::Function(FunctionCall::Custom(call)) => serde_json::json!({
+                "id": call.id.clone().unwrap_or_default(),
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": call.arguments,
+                },
+            }),
+            ToolCall::Function(FunctionCall::Code(call)) => {
+                let mut value =
+                    serde_json::to_value(call).map_err(S::Error::custom)?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("type".to_string(), serde_json::json!("code_interpreter"));
+                }
+                value
+            }
+            ToolCall::Function(FunctionCall::Retrieval(call)) => {
+                let mut value =
+                    serde_json::to_value(call).map_err(S::Error::custom)?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("type".to_string(), serde_json::json!("retrieval"));
+                }
+                value
+            }
+        };
+        value.serialize(serializer)
+    }
+}
+
 impl<'de> Deserialize<'de> for ToolCall {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
